@@ -964,7 +964,12 @@ function Workspace() {
         </div>
         <div className="sidebar-bottom">
           {user.role === "admin" && (
-            <button onClick={() => setAdmin(true)}>
+            <button
+              onClick={() => {
+                setSidebar(false);
+                setAdmin(true);
+              }}
+            >
               <ShieldCheck size={16} />
               账号与邀请码
             </button>

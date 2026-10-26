@@ -5727,7 +5727,22 @@ body.fill-dragging .data-table * {
   font-size: 14px;
 }
 .admin-modal {
-  width: min(760px, calc(100vw - 40px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.admin-modal > .modal-heading {
+  flex-shrink: 0;
+}
+.admin-content {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (min-width: 761px) {
+  .admin-modal {
+    width: min(760px, calc(100vw - 40px));
+  }
 }
 .admin-list {
   margin-top: 16px;
@@ -5745,12 +5760,41 @@ body.fill-dragging .data-table * {
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+.admin-row > div {
+  min-width: 0;
+}
 .admin-row small {
   display: block;
   color: #7a896e;
   font-size: 12px;
   margin-top: 5px;
+  overflow-wrap: anywhere;
 }
 .admin-row .button {
   font-size: 12px;
+}
+@media (max-width: 760px) {
+  .admin-modal .setting-item {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .admin-modal .account-toggle {
+    min-height: 42px;
+  }
+  .admin-modal .account-actions {
+    width: 100%;
+  }
+  .admin-modal .account-actions > * {
+    flex: 1;
+    min-width: 0;
+  }
+  .admin-modal .account-actions input[type="number"] {
+    width: 100%;
+  }
+  .admin-row {
+    align-items: flex-start;
+  }
+  .admin-row > div:first-child {
+    width: 100%;
+  }
 }

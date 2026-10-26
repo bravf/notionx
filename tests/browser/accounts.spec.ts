@@ -1,6 +1,117 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, devices } from "@playwright/test";
 import type { APIRequestContext, BrowserContext, Page } from "@playwright/test";
 const password = "test1234";
+test("mobile account management fits the sheet and keeps long-list actions reachable", async ({
+  browser,
+  request,
+}) => {
+  const admin = await owner(request);
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    serviceWorkers: "block",
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    storageState: await request.storageState(),
+  });
+  const member = {
+    ...admin,
+    id: "mobile-member",
+    username: "long_username_for_mobile_testing",
+    nickname: "用来检查移动端长名称换行的账号",
+    role: "member",
+  };
+  const overview = {
+    registrationEnabled: true,
+    users: [admin, member],
+    invitations: Array.from({ length: 24 }, (_, i) => ({
+      id: "mobile-invite-" + i,
+      prefix: "ABCDEF12",
+      expiresAt: Date.now() + 86400000,
+      revoked: 0,
+      usedBy: i ? member.username : null,
+      usedAt: i ? Date.now() : null,
+    })),
+  };
+  try {
+    await context.route(/\/api\/admin(?:\/|$)/, async (route) => {
+      const url = new URL(route.request().url());
+      const method = route.request().method();
+      if (method === "PATCH")
+        overview.registrationEnabled = route.request().postDataJSON().enabled;
+      if (method === "POST" && url.pathname.endsWith("/invitations")) {
+        await route.fulfill({ json: { code: "ABCD-1234-EFGH-5678" } });
+        return;
+      }
+      if (method === "POST" && url.pathname.endsWith("/password")) {
+        await route.fulfill({
+          json: { temporaryPassword: "mobile-temporary-123" },
+        });
+        return;
+      }
+      await route.fulfill({ json: overview });
+    });
+    const page = await context.newPage();
+    await page.goto("/");
+    await page.getByRole("button", { name: "展开导航", exact: true }).tap();
+    await page.getByRole("button", { name: "账号与邀请码", exact: true }).tap();
+    const dialog = page.getByRole("dialog", {
+      name: "账号与邀请码",
+      exact: true,
+    });
+    const close = dialog.getByRole("button", { name: "关闭", exact: true });
+    const content = dialog.locator(".admin-content");
+    await expect(
+      dialog.getByRole("button", { name: "生成邀请码" }),
+    ).toBeVisible();
+    await expect(page.locator(".app")).not.toHaveClass(/mobile-sidebar-open/);
+    for (const width of [320, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect
+        .poll(async () => {
+          const rect = await dialog.boundingBox();
+          return Math.abs(rect!.width - width);
+        })
+        .toBeLessThan(2);
+      expect(
+        await content.evaluate((el) => el.scrollWidth - el.clientWidth),
+      ).toBeLessThanOrEqual(1);
+    }
+    const registration = dialog.getByRole("checkbox", {
+      name: "允许邀请码注册",
+    });
+    await registration.tap();
+    await expect(registration).not.toBeChecked();
+    await expect(dialog.getByText("已关闭", { exact: true })).toBeVisible();
+    await registration.tap();
+    await expect(registration).toBeChecked();
+    await dialog.getByRole("button", { name: "生成邀请码", exact: true }).tap();
+    await expect(
+      dialog.getByLabel("邀请码（仅显示本次，请复制保存）"),
+    ).toHaveValue("ABCD-1234-EFGH-5678");
+    const reset = dialog.getByRole("button", { name: "重置密码", exact: true });
+    await reset.scrollIntoViewIfNeeded();
+    await expect(close).toBeInViewport();
+    expect(await content.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+    await reset.tap();
+    const confirmation = page.getByRole("dialog", {
+      name: "重置该用户的密码？",
+      exact: true,
+    });
+    await expect(confirmation).toBeVisible();
+    await confirmation
+      .getByRole("button", { name: "确认重置", exact: true })
+      .tap();
+    const temporary = dialog.getByLabel(
+      "临时密码（仅显示本次，请私下交给用户）",
+    );
+    await expect(temporary).toHaveValue("mobile-temporary-123");
+    await expect(temporary).toBeInViewport();
+    await expect(close).toBeInViewport();
+    await close.tap();
+    await expect(dialog).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
 async function owner(request: APIRequestContext) {
   const response = await request.post("/api/session", {
     data: {
