@@ -97,6 +97,9 @@ export default function App() {
 function Workspace() {
   const { user, request, logout } = useAuth();
   const recentKey = "notionx:" + user.id + ":" + user.workspaceId + ":recent";
+  const [coarsePointer, setCoarsePointer] = useState(
+    () => window.matchMedia("(pointer: coarse)").matches,
+  );
   const [admin, setAdmin] = useState(false);
   const [changePassword, setChangePassword] = useState(false);
   const {
@@ -171,6 +174,12 @@ function Workspace() {
     scroll.current?.scrollTo({ top: 0, behavior: "instant" });
   };
   const goHome = () => (homePage ? navigate(homePage.id) : startNew());
+  useEffect(() => {
+    const media = window.matchMedia("(pointer: coarse)");
+    const update = () => setCoarsePointer(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
   useEffect(() => {
     // Opening a page through a link or search should reveal it in the tree.
     const target = data.pages.find((p) => p.id === active && !p.deleted);
@@ -625,8 +634,12 @@ function Workspace() {
                   : "")
               }
               style={{ paddingLeft: 10 + depth * 14 }}
-              draggable={renaming?.id !== p.id}
+              draggable={!coarsePointer && renaming?.id !== p.id}
               onDragStart={(e) => {
+                if (coarsePointer) {
+                  e.preventDefault();
+                  return;
+                }
                 dragPage.current = p.id;
                 e.dataTransfer.effectAllowed = "move";
                 e.dataTransfer.setData("text/plain", p.id);
@@ -713,7 +726,9 @@ function Workspace() {
                   className="sidebar-page-main"
                   aria-current={active === p.id ? "page" : undefined}
                   onClick={() => navigate(p.id)}
-                  onDoubleClick={() => startRename(p)}
+                  onDoubleClick={
+                    coarsePointer ? undefined : () => startRename(p)
+                  }
                 >
                   <span className="page-emoji">{p.icon}</span>
                   <span>{p.title || "未命名"}</span>

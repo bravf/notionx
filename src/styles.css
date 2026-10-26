@@ -325,10 +325,6 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.favorite-page:hover,
-.sidebar-page:hover {
-  background: #eaf0e6;
-}
 .favorite-page.active,
 .sidebar-page.active {
   background: #e6ece2;
@@ -370,11 +366,9 @@ kbd {
 .tree-toggle.no-children {
   opacity: 0;
 }
-.sidebar-page:hover .tree-toggle.no-children {
-  opacity: 0.5;
-}
 .sidebar-page-main {
   display: flex;
+  align-self: stretch;
   align-items: center;
   gap: 9px;
   flex: 1;
@@ -416,9 +410,25 @@ kbd {
   opacity: 0;
   border-radius: 3px;
 }
-.sidebar-page:hover .page-more,
 .page-more:focus {
   opacity: 1;
+}
+@media (hover: hover) and (pointer: fine) {
+  .favorite-page:hover:not(.active),
+  .sidebar-page:hover:not(.active) {
+    background: #eaf0e6;
+  }
+  .sidebar-page:hover .tree-toggle.no-children {
+    opacity: 0.5;
+  }
+  .sidebar-page:hover .page-more {
+    opacity: 1;
+  }
+}
+@media (hover: none), (pointer: coarse) {
+  .page-more {
+    opacity: 0.5;
+  }
 }
 .sidebar-add-page {
   display: flex;

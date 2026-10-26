@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, devices } from "@playwright/test";
 import type { APIRequestContext } from "@playwright/test";
 let fixture: any;
 const identities = new WeakMap<APIRequestContext, string>();
@@ -658,6 +658,58 @@ test("mobile navigation, cell sheet, date-free numeric editing and full screen r
   await expect(page.locator(".sidebar")).toBeInViewport();
   await page.getByRole("button", { name: "关闭导航" }).click();
   await expect(page.locator(".app")).not.toHaveClass(/mobile-sidebar-open/);
+});
+
+test("touch navigation opens a page with one tap and has no drag or double-tap rename", async ({
+  browser,
+  request,
+}) => {
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      id: fixture.prefix + "_child",
+      title: "触摸测试子页面",
+      parentId: fixture.note.id,
+    }),
+  ]);
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    storageState: await request.storageState(),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("/#page=" + fixture.dbPage.id);
+    await page.getByRole("button", { name: "展开导航" }).tap();
+    const target = page
+      .locator(".sidebar-page-main")
+      .filter({ hasText: "验证笔记" });
+    await target.scrollIntoViewIfNeeded();
+    expect(await target.locator("xpath=..").getAttribute("draggable")).toBe(
+      "false",
+    );
+    await target.tap();
+    await expect(page).toHaveURL(new RegExp("page=" + fixture.note.id));
+    await expect(page.locator(".app")).not.toHaveClass(/mobile-sidebar-open/);
+
+    await page.getByRole("button", { name: "展开导航" }).tap();
+    await target
+      .locator("xpath=..")
+      .getByRole("button", { name: "展开子页面" })
+      .tap();
+    await expect(
+      page.locator(".sidebar-page-main").filter({ hasText: "触摸测试子页面" }),
+    ).toBeVisible();
+    await expect(page.locator(".app")).toHaveClass(/mobile-sidebar-open/);
+    await target.evaluate((element) =>
+      element.dispatchEvent(
+        new MouseEvent("dblclick", { bubbles: true, cancelable: true }),
+      ),
+    );
+    await expect(page.getByLabel("页面名称")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
 });
 
 test("CSV import validates mapping and exports decimal formula values", async ({
