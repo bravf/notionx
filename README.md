@@ -1,6 +1,8 @@
 # 拾页 · NotionX
 
-面向个人使用的笔记与结构化数据表格应用。支持桌面和手机，内容持久化到服务端 SQLite。
+支持邀请码注册的笔记与结构化数据表格应用，每个账号拥有独立私人空间。支持桌面和手机，内容持久化到服务端 SQLite。
+
+多用户版本的初始化、升级、邀请码和账号管理请先阅读 [多用户说明](docs/multiuser.md)。首次启动需要 ADMIN_PASSWORD；旧部署可使用已有 APP_PASSWORD 初始化 admin，首次登录必须改密。
 
 ## 启动
 
@@ -8,7 +10,7 @@
 
 ```sh
 npm install
-npm run dev
+ADMIN_PASSWORD='请替换为至少12个字符的初始密码' npm run dev
 ```
 
 默认地址为 `http://localhost:5173`。开发服务绑定 `0.0.0.0`，手机与电脑处在同一局域网时，使用 `http://电脑的局域网IP:5173` 访问。手机的 localhost 指向手机自己。系统防火墙需要允许访问此端口。
@@ -17,7 +19,7 @@ npm run dev
 
 ```sh
 npm run build
-APP_PASSWORD='设置你自己的密码' npm start
+ADMIN_PASSWORD='请替换为至少12个字符的初始密码' npm start
 ```
 
 长期部署建议使用 HTTPS 反向代理。HTTPS 下设置 `COOKIE_SECURE=true`。PWA 安装和 Service Worker 需要安全上下文，手机普通局域网 HTTP 可直接浏览使用，无法保证可安装为 PWA。
@@ -50,16 +52,18 @@ SUM({收入}, -{支出})
 
 ## 数据与部署配置
 
-| 环境变量        | 默认值                | 用途                              |
-| --------------- | --------------------- | --------------------------------- |
-| `HOST` | `0.0.0.0` | 监听地址；线上设为 127.0.0.1 |
-| `PORT`          | `5173`                | HTTP 端口                         |
-| `DATABASE_PATH` | `data/notionx.sqlite` | SQLite 数据文件                   |
-| `APP_PASSWORD`  | 未设置                | 设置后开启单用户密码登录          |
-| `COOKIE_SECURE` | `false`               | HTTPS 部署设为 `true`             |
-| `NODE_ENV`      | 开发模式              | `production` 使用已构建的静态文件 |
+| 环境变量         | 默认值                | 用途                                   |
+| ---------------- | --------------------- | -------------------------------------- |
+| `HOST`           | `0.0.0.0`             | 监听地址；线上设为 127.0.0.1           |
+| `PORT`           | `5173`                | HTTP 端口                              |
+| `DATABASE_PATH`  | `data/notionx.sqlite` | SQLite 数据文件                        |
+| `ADMIN_USERNAME` | admin                 | 首次初始化管理员用户名                 |
+| `ADMIN_PASSWORD` | 未设置                | 首次初始化管理员临时密码，至少 12 字符 |
+| `APP_PASSWORD`   | 未设置                | 兼容旧版，仅首次初始化管理员           |
+| `COOKIE_SECURE`  | `false`               | HTTPS 部署设为 `true`                  |
+| `NODE_ENV`       | 开发模式              | `production` 使用已构建的静态文件      |
 
-SQLite 启用 WAL 和事务，页面、数据表格、属性、记录、视图分别存表，动态内容使用 JSON 保存。普通编辑只更新变更实体，完整恢复在事务中替换。数据结构版本记录在 metadata，当前为版本 1。
+SQLite 启用 WAL 和事务，页面、数据表格、属性、记录、视图分别存表，动态内容使用 JSON 保存。普通编辑只更新变更实体，完整恢复在事务中替换。数据库结构版本为 2，旧版启动时事务迁移。所有实体及版本号按空间隔离，用户 JSON 备份仍使用版本 1，可继续导入。
 
 建议通过“设置与备份”定期导出 JSON；运行中的 SQLite 数据库不应只复制 `.sqlite` 文件而忽略 WAL。图片作为正文内的 data URL 保存在数据库，单张限制 5MB。
 
@@ -79,13 +83,12 @@ npm run build
 浏览器测试使用已安装的 Google Chrome，先启动应用，再执行：
 
 ```sh
-TEST_URL=http://localhost:5198 npm run test:e2e
+TEST_URL=http://localhost:5198 TEST_USERNAME=admin TEST_PASSWORD='测试账号当前密码' npm run test:e2e
 ```
 
-建议使用单独的测试数据库和端口，例如 `PORT=5198 DATABASE_PATH=data/browser-test.sqlite npm start`。测试创建并清理自己的数据；完整备份恢复测试请勿针对正在使用的个人工作空间运行。
+建议使用单独的测试数据库和端口，例如 `PORT=5198 DATABASE_PATH=data/browser-test.sqlite npm start`。先设置初始管理员密码，在浏览器完成首次改密，再用当前密码运行测试。测试创建并清理自己的数据；完整备份恢复测试请勿针对正在使用的个人工作空间运行。
 
 交互说明：页面标题会随内容自动换行，在标题中按 Enter 或点击正文下方空白处会把光标移到正文末尾；新建页面后可直接输入标题。文本格式工具栏只在选中文字时出现，定位在选区上方；折叠光标时不显示，离开编辑器或取消选择后收起。块类型转换、块操作和撤销/重做位于左侧手柄菜单，手柄从正文或左侧空白 gutter 进入都会出现。所有表单下拉框使用 Radix Select，支持键盘选择与 Escape 关闭。数据表格单选、多选和状态使用可搜索弹层，可直接创建新选项；多选可以连续勾选后点击“完成”。日期使用 DayPicker，桌面端为左右分栏：左侧日历，右侧开始/结束日期、结束日期与具体时间开关；默认保存单日，开启结束日期后可选范围，开启具体时间后可设置起止时间。支持直接输入日期和今天/明天/下周快捷选择。单元格 Enter 保存并沿同列向下编辑（跳过公式等只读列），Tab 跳过计算列，Escape 放弃草稿；无效数字显示错误提示。列宽支持实时拖动、键盘左右调整、双击重置。数据表格行、列拖动展示完整内容（列包含汇总），相邻内容平滑让位，支持边缘自动滚动、Esc 取消和落位动画；松开后保存顺序，标题列固定。启用排序或分组时暂停手动拖动记录。手机端可通过“属性”入口找回隐藏列。
-
 
 ### 编辑交互与撤销
 
@@ -97,14 +100,13 @@ TEST_URL=http://localhost:5198 npm run test:e2e
 - 日期选择器定位到已选日期，支持年月下拉和直接输入日期；开启结束日期时默认将结束设为开始日期，下一次点击可调整结束；时间默认补 09:00 与 18:00。新插入的工作空间页面引用按页面 ID 显示当前名称；历史普通链接保持原文字。
 - 手机编辑工具根据 visualViewport 调整位置；桌面浏览器的手机模拟不等同于 iOS/Android 真机键盘验证。
 
-
 ### 阿里云部署
 
 线上地址：https://notionx.mushayu.com 。使用与本机 PromptX 相同的阿里云主机。应用独立运行于 notionx.service，监听 127.0.0.1:3220，由 /usr/local/nginx 反向代理并使用 Let's Encrypt HTTPS。证书由服务器现有 certbot timer 自动续期。
 
 本地执行 bash scripts/deploy-aliyun.sh 运行测试、构建、上传并准备发布。随后在 PromptX 托管终端中前台执行 bash scripts/run-aliyun.sh，激活服务并持续显示远端日志，同时建立本机 127.0.0.1:53220 的 SSH 就绪检查隧道。应用本身由远端 systemd 托管，关闭本机日志终端不会停止线上应用。
 
-首次发布自动生成访问密码，保存在服务器 /etc/notionx/notionx.env；部署脚本会同步到本地 .env.aliyun（权限 600，Git 忽略）。使用其中 APP_PASSWORD 的值登录。更改服务器该文件后重启 notionx.service 生效；重启后需要重新登录。
+首次发布自动生成访问密码，保存在服务器 /etc/notionx/notionx.env；部署脚本会同步到本地 .env.aliyun（权限 600，Git 忽略）。升级时用用户名 admin 和 APP_PASSWORD 的值首次登录，随后必须修改密码。已有账号的密码不会被环境变量覆盖；服务重启保留有效登录。
 
 - 发布目录：/opt/notionx/releases/，current 指向当前版本，previous 指向上一版；每次发布保留旧版本，回滚时将 current 切回 previous 指向的绝对路径并重启服务。
 - 持久化数据：/var/lib/notionx/notionx.sqlite，以独立 notionx 用户运行；重新部署不覆盖数据库。不上传本地 data/，本地已有内容可用应用的 JSON 导出、导入迁移。

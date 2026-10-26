@@ -1,4 +1,6 @@
 import { Select } from "./components/Select";
+import { AuthProvider, useAuth, PasswordForm } from "./auth";
+import { AdminPanel } from "./components/AdminPanel";
 import { useEffect, useRef, useState } from "react";
 import {
   BookOpen,
@@ -85,12 +87,18 @@ const pageId = () =>
   new URLSearchParams(location.hash.slice(1)).get("page") || "home";
 export default function App() {
   return (
-    <StoreProvider>
-      <Workspace />
-    </StoreProvider>
+    <AuthProvider>
+      <StoreProvider>
+        <Workspace />
+      </StoreProvider>
+    </AuthProvider>
   );
 }
 function Workspace() {
+  const { user, request, logout } = useAuth();
+  const recentKey = "notionx:" + user.id + ":" + user.workspaceId + ":recent";
+  const [admin, setAdmin] = useState(false);
+  const [changePassword, setChangePassword] = useState(false);
   const {
     data,
     status,
@@ -119,7 +127,7 @@ function Workspace() {
     } | null>(null),
     [recent, setRecent] = useState<string[]>(() => {
       try {
-        return JSON.parse(localStorage.getItem("notionx-recent") || "[]");
+        return JSON.parse(localStorage.getItem(recentKey) || "[]");
       } catch {
         return [];
       }
@@ -247,7 +255,7 @@ function Workspace() {
         30,
       );
       try {
-        localStorage.setItem("notionx-recent", JSON.stringify(next));
+        localStorage.setItem(recentKey, JSON.stringify(next));
       } catch {}
       return next;
     });
@@ -942,6 +950,12 @@ function Workspace() {
           </div>
         </div>
         <div className="sidebar-bottom">
+          {user.role === "admin" && (
+            <button onClick={() => setAdmin(true)}>
+              <ShieldCheck size={16} />
+              账号与邀请码
+            </button>
+          )}
           <button onClick={() => setSettings(true)}>
             <Settings size={16} />
             设置与备份
@@ -954,12 +968,14 @@ function Workspace() {
             )}
           </button>
           <div className="sidebar-profile">
-            <div className="avatar">我</div>
+            <div className="avatar">{user.nickname.slice(0, 1)}</div>
             <div>
-              <strong>我的工作空间</strong>
+              <strong>{user.nickname}</strong>
               <small>属于自己的数字花园</small>
             </div>
-            <span className="personal-badge">个人版</span>
+            <span className="personal-badge">
+              {user.role === "admin" ? "管理员" : "个人版"}
+            </span>
           </div>
         </div>
       </aside>
@@ -1122,13 +1138,21 @@ function Workspace() {
           ) : !page ? (
             <div className="missing-page">
               <FileText size={38} />
-              <h1>这一页暂时不在这里</h1>
-              <p>它可能已被移到回收站，或者你还没有创建页面。</p>
+              <h1>
+                {data.pages.length === 0
+                  ? "你的私人空间准备好了"
+                  : "这一页暂时不在这里"}
+              </h1>
+              <p>
+                {data.pages.length === 0
+                  ? "从第一篇笔记开始，记录属于自己的日常。"
+                  : "它可能已被移到回收站，或者你还没有创建页面。"}
+              </p>
               <button
                 className="button primary"
                 onClick={() => (pages[0] ? navigate(pages[0].id) : startNew())}
               >
-                打开工作空间
+                {data.pages.length === 0 ? "创建第一篇笔记" : "打开工作空间"}
               </button>
             </div>
           ) : (
@@ -1818,6 +1842,20 @@ function Workspace() {
           toast("页面已永久删除");
         }}
       />
+      <AdminPanel open={admin} onOpenChange={setAdmin} />
+      <Modal
+        open={changePassword}
+        onOpenChange={setChangePassword}
+        title="修改密码"
+        description="修改后其他设备需要重新登录。"
+      >
+        <PasswordForm
+          onDone={() => {
+            setChangePassword(false);
+            toast("密码已更新");
+          }}
+        />
+      </Modal>
       <Modal
         open={settings}
         onOpenChange={setSettings}
@@ -1825,6 +1863,29 @@ function Workspace() {
         description="认真记录，也认真保管。你的内容始终属于你。"
         className="settings-modal"
       >
+        <div className="settings-section">
+          <h3>账号</h3>
+          <p className="form-hint">
+            {user.nickname} · @{user.username} · 私人空间
+          </p>
+          <div className="account-actions">
+            <button className="button" onClick={() => setChangePassword(true)}>
+              修改密码
+            </button>
+            <button
+              className="button"
+              disabled={status !== "saved"}
+              onClick={() => void logout().catch((e) => toast(e.message))}
+            >
+              退出登录
+            </button>
+          </div>
+          {status !== "saved" && (
+            <p className="form-hint">
+              保存完成后即可退出；保存失败时请先导出本机内容。
+            </p>
+          )}
+        </div>
         <div className="settings-section">
           <h3>
             <HardDrive size={17} />
@@ -1864,7 +1925,7 @@ function Workspace() {
               disabled={status !== "saved"}
               onClick={async () => {
                 try {
-                  const r = await fetch("/api/backup");
+                  const r = await request("/api/backup");
                   if (!r.ok) throw new Error("导出失败");
                   download(
                     "拾页备份-" +
@@ -1948,7 +2009,7 @@ function Workspace() {
         onConfirm={async () => {
           setRestoreBusy(true);
           try {
-            const r = await fetch("/api/restore", {
+            const r = await request("/api/restore", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({

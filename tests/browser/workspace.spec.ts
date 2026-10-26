@@ -1,13 +1,19 @@
 import { test, expect } from "@playwright/test";
 import type { APIRequestContext } from "@playwright/test";
 let fixture: any;
+const identities = new WeakMap<APIRequestContext, string>();
 const mod = process.platform === "darwin" ? "Meta" : "Control";
 async function snapshot(request: APIRequestContext) {
-  return (await request.get("/api/workspace")).json();
+  return (
+    await request.get("/api/workspace", {
+      headers: { "X-NotionX-User": identities.get(request)! },
+    })
+  ).json();
 }
 async function mutate(request: APIRequestContext, ops: any[]) {
   const s = await snapshot(request);
   const r = await request.post("/api/mutate", {
+    headers: { "X-NotionX-User": identities.get(request)! },
     data: { revision: s.revision, ops },
   });
   expect(r.ok(), await r.text()).toBeTruthy();
@@ -23,7 +29,24 @@ async function selectValue(page: any, label: string, value: string) {
   await page.getByRole("combobox", { name: label, exact: true }).click();
   await page.locator(`[role="option"][data-value="${value}"]`).click();
 }
-test.beforeEach(async ({ request }) => {
+test.beforeEach(async ({ request, context }) => {
+  const login = await request.post("/api/session", {
+    data: {
+      username: process.env.TEST_USERNAME || "admin",
+      password: process.env.TEST_PASSWORD,
+    },
+  });
+  expect(
+    login.ok(),
+    "请设置专用测试账号 TEST_USERNAME / TEST_PASSWORD",
+  ).toBeTruthy();
+  const session = await login.json();
+  expect(
+    session.user.mustChangePassword,
+    "请先完成测试账号的首次密码修改",
+  ).toBeFalsy();
+  identities.set(request, session.user.id);
+  await context.addCookies((await request.storageState()).cookies);
   const prefix = "e2e_" + Math.random().toString(36).slice(2),
     now = new Date().toISOString(),
     dbId = prefix + "_db";
@@ -236,7 +259,11 @@ test("continuous offline typing checkpoints drafts and reload recovers the lates
   const readDraftTitle = () =>
     page.evaluate((id) => {
       const draft = JSON.parse(
-        localStorage.getItem("notionx-pending") || "null",
+        localStorage.getItem(
+          Object.keys(localStorage).find(
+            (key) => key.startsWith("notionx:") && key.endsWith(":pending"),
+          ) || "",
+        ) || "null",
       );
       return draft?.pages.find((p: any) => p.id === id)?.title;
     }, fixture.note.id);
@@ -255,7 +282,13 @@ test("continuous offline typing checkpoints drafts and reload recovers the lates
     page.getByRole("dialog", { name: "发现上次未保存的内容" }),
   ).toBeVisible();
   const recovered = await page.evaluate(() =>
-    JSON.parse(localStorage.getItem("notionx-recovery") || "null"),
+    JSON.parse(
+      localStorage.getItem(
+        Object.keys(localStorage).find(
+          (key) => key.startsWith("notionx:") && key.endsWith(":recovery"),
+        ) || "",
+      ) || "null",
+    ),
   );
   expect(recovered.pages.find((p: any) => p.id === fixture.note.id).title).toBe(
     "latest edit before leaving",
@@ -769,7 +802,11 @@ test("full backup restores structured records and page content atomically", asyn
   page,
   request,
 }) => {
-  const backup = await (await request.get("/api/backup")).json();
+  const backup = await (
+    await request.get("/api/backup", {
+      headers: { "X-NotionX-User": identities.get(request)! },
+    })
+  ).json();
   await mutate(request, [
     set("pages", { ...fixture.note, title: "备份后的变动" }),
   ]);
@@ -962,9 +999,9 @@ test("date picker keeps single dates single, and enables ranges and times explic
   popover = await open();
   await popover.getByLabel("启用结束日期").check();
   await popover.getByRole("button", { name: /2026年10月25日/ }).click();
-  await expect(
-    popover.getByLabel("结束日期", { exact: true }),
-  ).toHaveValue("2026-10-25");
+  await expect(popover.getByLabel("结束日期", { exact: true })).toHaveValue(
+    "2026-10-25",
+  );
   await finish(popover);
   state = await snapshot(request);
   expect(
@@ -2588,7 +2625,9 @@ test("clicking outside the table or on the header clears cell selection", async 
   await cell.click();
   await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
   await page
-    .locator(`thead th[data-field-id="${fixture.fields[1].id}"] .column-heading button`)
+    .locator(
+      `thead th[data-field-id="${fixture.fields[1].id}"] .column-heading button`,
+    )
     .click();
   await expect(page.locator(".grid-cell-selected")).toHaveCount(0);
   await page.keyboard.press("Escape");
@@ -2639,8 +2678,7 @@ test("cell click selects, typing edits, and fill handle copies values down", asy
   await mutate(request, [set("records", third)]);
   await page.goto("/#page=" + fixture.dbPage.id);
   const ids = [fixture.records[0].id, fixture.records[1].id, third.id];
-  const row = (index: number) =>
-    page.locator(`[data-row-id="${ids[index]}"]`);
+  const row = (index: number) => page.locator(`[data-row-id="${ids[index]}"]`);
   const qty = (index: number) =>
     row(index).locator(`td[data-field-id="${fixture.fields[1].id}"]`);
 
@@ -2662,9 +2700,7 @@ test("cell click selects, typing edits, and fill handle copies values down", asy
 
   await page.keyboard.press("ArrowDown");
   await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
-  await expect(
-    qty(1).locator("button.cell-value"),
-  ).toBeFocused();
+  await expect(qty(1).locator("button.cell-value")).toBeFocused();
   await page.keyboard.press("ArrowUp");
 
   const handle = page.locator(".fill-handle");
@@ -2725,9 +2761,7 @@ test("grouped database selection follows visible rows and skips collapsed groups
     );
   await cell(fixture.records[0].id).focus();
   await page.keyboard.press("ArrowDown");
-  await expect(
-    cell(third.id).locator("button.cell-value"),
-  ).toBeFocused();
+  await expect(cell(third.id).locator("button.cell-value")).toBeFocused();
   await page.locator(".group-row button").first().click();
   await expect(cell(third.id)).toHaveCount(0);
   await cell(fixture.records[1].id).focus();

@@ -4,52 +4,94 @@ import { dirname } from "node:path";
 import { seed } from "./seed.js";
 import { convertValue } from "../shared/data.js";
 export const entities = ["pages", "databases", "fields", "records", "views"];
-export function createStore(path) {
+export function createStore(path, workspaceId = "legacy", connection) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-  const db = new Database(path);
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
-  db.exec(
-    "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-  );
-  for (const table of entities)
+  const db = connection || new Database(path);
+  if (!connection) {
+    db.pragma("journal_mode = WAL");
+    db.pragma("busy_timeout = 5000");
+    db.pragma("foreign_keys = ON");
     db.exec(
-      `CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, data TEXT NOT NULL CHECK(json_valid(data)))`,
+      "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     );
-  db.exec(
-    "INSERT OR IGNORE INTO metadata VALUES ('revision','0'); INSERT OR IGNORE INTO metadata VALUES ('schema','1')",
-  );
+  }
+  if (!connection)
+    db.transaction(() => {
+      db.exec(
+        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)",
+      );
+      const revision = Number(
+        db.prepare("SELECT value FROM metadata WHERE key='revision'").get()
+          ?.value || 0,
+      );
+      db.prepare(
+        "INSERT OR IGNORE INTO workspaces(id,revision) VALUES ('legacy',?)",
+      ).run(revision);
+      for (const table of entities) {
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+        if (columns.length && !columns.some((c) => c.name === "workspace_id")) {
+          db.exec(`ALTER TABLE ${table} RENAME TO ${table}_legacy`);
+          db.exec(
+            `CREATE TABLE ${table} (workspace_id TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), PRIMARY KEY(workspace_id,id))`,
+          );
+          db.exec(
+            `INSERT INTO ${table} SELECT 'legacy',id,data FROM ${table}_legacy; DROP TABLE ${table}_legacy`,
+          );
+        } else
+          db.exec(
+            `CREATE TABLE IF NOT EXISTS ${table} (workspace_id TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), PRIMARY KEY(workspace_id,id))`,
+          );
+      }
+      db.prepare(
+        "INSERT INTO metadata(key,value) VALUES ('schema','2') ON CONFLICT(key) DO UPDATE SET value='2'",
+      ).run();
+    })();
+  if (!db.prepare("SELECT id FROM workspaces WHERE id=?").get(workspaceId))
+    throw new Error("工作空间不存在");
+  if (!connection)
+    db.exec(
+      "INSERT OR IGNORE INTO metadata VALUES ('revision','0'); INSERT OR IGNORE INTO metadata VALUES ('schema','1')",
+    );
   const snapshot = () =>
     Object.fromEntries([
       ...entities.map((t) => [
         t,
         db
-          .prepare(`SELECT data FROM ${t}`)
-          .all()
+          .prepare(`SELECT data FROM ${t} WHERE workspace_id=? ORDER BY rowid`)
+          .all(workspaceId)
           .map((r) => JSON.parse(r.data)),
       ]),
       [
         "revision",
-        Number(
-          db.prepare("SELECT value FROM metadata WHERE key='revision'").get()
-            .value,
-        ),
+        db
+          .prepare("SELECT revision FROM workspaces WHERE id=?")
+          .get(workspaceId).revision,
       ],
     ]);
-  const replace = db.transaction((data) => {
+  const replace = db.transaction((data, revision) => {
+    if (revision !== undefined && revision !== snapshot().revision)
+      throw Object.assign(new Error("数据已变化，请刷新后重试"), {
+        status: 409,
+      });
     validate(data);
     for (const t of entities) {
-      db.prepare(`DELETE FROM ${t}`).run();
-      const stmt = db.prepare(`INSERT INTO ${t} (id,data) VALUES (?,?)`);
-      for (const item of data[t]) stmt.run(item.id, JSON.stringify(item));
+      db.prepare(`DELETE FROM ${t} WHERE workspace_id=?`).run(workspaceId);
+      const stmt = db.prepare(
+        `INSERT INTO ${t} (workspace_id,id,data) VALUES (?,?,?)`,
+      );
+      for (const item of data[t])
+        stmt.run(workspaceId, item.id, JSON.stringify(item));
     }
-    db.prepare(
-      "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
-    ).run();
+    db.prepare("UPDATE workspaces SET revision=revision+1 WHERE id=?").run(
+      workspaceId,
+    );
     return snapshot();
   });
   if (
-    !db.prepare("SELECT id FROM pages LIMIT 1").get() &&
+    workspaceId === "legacy" &&
+    !db
+      .prepare("SELECT id FROM pages WHERE workspace_id='legacy' LIMIT 1")
+      .get() &&
     !db.prepare("SELECT value FROM metadata WHERE key='initialized'").get()
   ) {
     replace(seed());
@@ -64,7 +106,12 @@ export function createStore(path) {
     }
     if (!Array.isArray(ops) || ops.length > 1000) throw new Error("无效操作");
     for (const op of ops) {
-      if (!entities.includes(op.entity) || typeof op.id !== "string" || !op.id)
+      if (
+        !op ||
+        !entities.includes(op.entity) ||
+        typeof op.id !== "string" ||
+        !op.id
+      )
         throw new Error("无效数据类型或 ID");
       if (op.action === "delete")
         current[op.entity] = current[op.entity].filter((x) => x.id !== op.id);
@@ -80,16 +127,25 @@ export function createStore(path) {
       const item = current[op.entity].find((item) => item.id === op.id);
       if (item)
         db.prepare(
-          `INSERT INTO ${op.entity} (id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data`,
-        ).run(item.id, JSON.stringify(item));
-      else db.prepare(`DELETE FROM ${op.entity} WHERE id=?`).run(op.id);
+          `INSERT INTO ${op.entity} (workspace_id,id,data) VALUES (?,?,?) ON CONFLICT(workspace_id,id) DO UPDATE SET data=excluded.data`,
+        ).run(workspaceId, item.id, JSON.stringify(item));
+      else
+        db.prepare(
+          `DELETE FROM ${op.entity} WHERE workspace_id=? AND id=?`,
+        ).run(workspaceId, op.id);
     }
-    db.prepare(
-      "UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'",
-    ).run();
+    db.prepare("UPDATE workspaces SET revision=revision+1 WHERE id=?").run(
+      workspaceId,
+    );
     return snapshot();
   });
-  return { db, snapshot, replace, mutate };
+  return {
+    db,
+    snapshot,
+    replace,
+    mutate,
+    forWorkspace: (id) => createStore(path, id, db),
+  };
 }
 export function validate(data) {
   for (const t of entities) {

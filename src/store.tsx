@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 import type { Workspace, Op, Entity } from "./types";
 import { download } from "./types";
 import { Modal } from "./components/ui";
+import { useAuth } from "./auth";
 type Status = "loading" | "saved" | "saving" | "error" | "conflict";
 interface Store {
   data: Workspace;
@@ -80,12 +81,14 @@ function historyScope(data: Workspace, ops: Op[]) {
 }
 
 export function StoreProvider({ children }: { children: ReactNode }) {
+  const { user, request } = useAuth();
+  const pendingKey = "notionx:" + user.id + ":" + user.workspaceId + ":pending";
+  const recoveryKey =
+    "notionx:" + user.id + ":" + user.workspaceId + ":recovery";
   const [data, setData] = useState(initial),
     [status, setStatus] = useState<Status>("loading"),
     [error, setError] = useState(""),
-    [notice, setNotice] = useState(""),
-    [auth, setAuth] = useState(false),
-    [password, setPassword] = useState("");
+    [notice, setNotice] = useState("");
   const [recovery, setRecovery] = useState<string | null>(null);
   const histories = useRef(
     new Map<string, { undo: HistoryEntry[]; redo: HistoryEntry[] }>(),
@@ -105,11 +108,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!queue.current.length && !busy.current) return;
     try {
       localStorage.setItem(
-        "notionx-pending",
+        pendingKey,
         JSON.stringify({ ...ref.current, schemaVersion: 1 }),
       );
     } catch {}
-  }, []);
+  }, [pendingKey]);
   const toast = useCallback((text: string) => {
     setNotice(text);
     clearTimeout(toastTimer.current);
@@ -117,9 +120,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
   const reload = useCallback(async () => {
     try {
-      const response = await fetch("/api/workspace");
+      const response = await request("/api/workspace");
       if (response.status === 401) {
-        setAuth(true);
         return;
       }
       if (!response.ok) throw new Error("暂时无法加载工作空间");
@@ -134,19 +136,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setError("");
       clearTimeout(storageTimer.current);
       storageTimer.current = undefined;
-      localStorage.removeItem("notionx-pending");
+      localStorage.removeItem(pendingKey);
     } catch (e) {
       setError((e as Error).message);
       setStatus("error");
     }
-  }, []);
+  }, [request, pendingKey]);
   const drain = useCallback(async () => {
     if (busy.current || blocked.current || !queue.current.length) return;
     busy.current = true;
     const ops = queue.current.splice(0);
     setStatus("saving");
     try {
-      const response = await fetch("/api/mutate", {
+      const response = await request("/api/mutate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ revision: revision.current, ops }),
@@ -157,7 +159,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           blocked.current = true;
           setStatus("conflict");
         }
-        if (response.status === 401) setAuth(true);
         throw new Error(state.error || "保存失败");
       }
       revision.current = state.revision;
@@ -168,7 +169,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!queue.current.length) {
         clearTimeout(storageTimer.current);
         storageTimer.current = undefined;
-        localStorage.removeItem("notionx-pending");
+        localStorage.removeItem(pendingKey);
       }
     } catch (e) {
       queue.current = [...ops, ...queue.current];
@@ -178,7 +179,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     } finally {
       busy.current = false;
     }
-  }, [persistPending]);
+  }, [persistPending, request, pendingKey]);
   const mutate = useCallback(
     (ops: Op[]) => {
       if (!ops.length) return;
@@ -282,16 +283,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   }, [data, status, drain]);
   useEffect(() => {
-    const draft = localStorage.getItem("notionx-pending");
-    if (draft) {
-      localStorage.setItem("notionx-recovery", draft);
+    if (user.role === "admin" && user.workspaceId === "legacy") {
+      for (const [oldKey, key] of [
+        ["notionx-pending", pendingKey],
+        ["notionx-recovery", recoveryKey],
+      ]) {
+        const value = localStorage.getItem(oldKey);
+        if (value && !localStorage.getItem(key))
+          localStorage.setItem(key, value);
+        localStorage.removeItem(oldKey);
+      }
     }
-    setRecovery(localStorage.getItem("notionx-recovery"));
+    const draft = localStorage.getItem(pendingKey);
+    if (draft) {
+      localStorage.setItem(recoveryKey, draft);
+    }
+    setRecovery(localStorage.getItem(recoveryKey));
     void reload();
     const interval = setInterval(async () => {
       if (busy.current || queue.current.length || blocked.current) return;
       try {
-        const r = await fetch("/api/workspace");
+        const r = await request("/api/workspace");
         if (!r.ok) return;
         const d = await r.json();
         if (
@@ -320,6 +332,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     window.addEventListener("pagehide", persistPending);
     document.addEventListener("visibilitychange", hide);
     return () => {
+      persistPending();
+      clearTimeout(timer.current);
       clearInterval(interval);
       window.removeEventListener("beforeunload", unload);
       window.removeEventListener("pagehide", persistPending);
@@ -327,7 +341,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       clearTimeout(storageTimer.current);
       storageTimer.current = undefined;
     };
-  }, [reload, toast, persistPending]);
+  }, [reload, toast, persistPending, request, pendingKey, recoveryKey]);
   return (
     <Context.Provider
       value={{
@@ -372,7 +386,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           <button
             className="text-button danger mr-auto"
             onClick={() => {
-              localStorage.removeItem("notionx-recovery");
+              localStorage.removeItem(recoveryKey);
               setRecovery(null);
             }}
           >
@@ -392,37 +406,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       {notice && (
         <div className="toast" role="status">
           {notice}
-        </div>
-      )}
-      {auth && (
-        <div className="auth-screen">
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              const r = await fetch("/api/session", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ password }),
-              });
-              if (r.ok) {
-                setAuth(false);
-                setPassword("");
-                void reload();
-              } else toast("密码不正确");
-            }}
-          >
-            <div className="brand-mark">拾</div>
-            <h2>欢迎回到拾页</h2>
-            <p>输入你的工作空间密码</p>
-            <input
-              type="password"
-              autoFocus
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="密码"
-            />
-            <button className="button primary">进入工作空间</button>
-          </form>
         </div>
       )}
     </Context.Provider>
