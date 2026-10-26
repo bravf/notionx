@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import type { APIRequestContext } from "@playwright/test";
 let fixture: any;
+const mod = process.platform === "darwin" ? "Meta" : "Control";
 async function snapshot(request: APIRequestContext) {
   return (await request.get("/api/workspace")).json();
 }
@@ -139,6 +140,366 @@ async function saved(page: any) {
   await expect(page.locator(".save-status")).toContainText("已保存");
 }
 
+test("cross-block text selection selects complete blocks while same-block text stays precise", async ({
+  page,
+  request,
+}) => {
+  const texts = ["first block", "second block", "keep third", "keep fourth"];
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: texts.map((text) => ({
+          type: "paragraph",
+          content: [{ type: "text", text }],
+        })),
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  await editor.evaluate((el: any) => {
+    el.editor.view.focus();
+    el.editor.commands.setTextSelection({ from: 3, to: 19 });
+  });
+  await expect(editor.locator(".block-selected")).toHaveCount(2);
+  const selection = await editor.evaluate((el: any) =>
+    el.editor.state.selection.toJSON(),
+  );
+  expect(selection).toMatchObject({ type: "notionxBlock" });
+  await page.keyboard.press("Backspace");
+  await expect(editor.locator(":scope > p")).toHaveText([
+    "keep third",
+    "keep fourth",
+  ]);
+  await page.keyboard.press(`${mod}+z`);
+  await expect(editor.locator(":scope > p")).toHaveText([
+    "first block",
+    "second block",
+    "keep third",
+    "keep fourth",
+  ]);
+});
+
+test("dragging from the middle of one block into another selects both blocks", async ({
+  page,
+  request,
+}) => {
+  const texts = ["first block", "second block", "keep third"];
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: texts.map((text) => ({
+          type: "paragraph",
+          content: [{ type: "text", text }],
+        })),
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const first = editor.locator(":scope > p").first();
+  const second = editor.locator(":scope > p").nth(1);
+  const firstBox = await first.boundingBox();
+  const secondBox = await second.boundingBox();
+  await page.mouse.move(
+    firstBox!.x + firstBox!.width * 0.4,
+    firstBox!.y + firstBox!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    secondBox!.x + secondBox!.width * 0.6,
+    secondBox!.y + secondBox!.height / 2,
+    { steps: 12 },
+  );
+  await page.mouse.up();
+  await expect(editor.locator(".block-selected")).toHaveCount(2);
+  await expect(editor.locator(":scope > p").first()).toHaveText("first block");
+  await expect(editor.locator(":scope > p").nth(1)).toHaveText("second block");
+  const selection = await editor.evaluate((el: any) =>
+    el.editor.state.selection.toJSON(),
+  );
+  expect(selection).toMatchObject({ type: "notionxBlock" });
+});
+
+test("continuous offline typing checkpoints drafts and reload recovers the latest edit", async ({
+  page,
+}) => {
+  await page.goto("/#page=" + fixture.note.id);
+  await saved(page);
+  await page.route("**/api/mutate", (route) => route.abort("failed"));
+  const title = page.getByLabel("页面标题", { exact: true });
+  await title.fill("offline first");
+  const readDraftTitle = () =>
+    page.evaluate((id) => {
+      const draft = JSON.parse(
+        localStorage.getItem("notionx-pending") || "null",
+      );
+      return draft?.pages.find((p: any) => p.id === id)?.title;
+    }, fixture.note.id);
+  expect(await readDraftTitle()).toBe("offline first");
+  await page.clock.install();
+  for (let i = 0; i < 10; i++) {
+    await title.fill("offline typing " + i);
+    await page.clock.runFor(100);
+  }
+  expect(await readDraftTitle()).not.toBe("offline first");
+  await title.fill("latest edit before leaving");
+  await page.clock.resume();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.reload();
+  await expect(
+    page.getByRole("dialog", { name: "发现上次未保存的内容" }),
+  ).toBeVisible();
+  const recovered = await page.evaluate(() =>
+    JSON.parse(localStorage.getItem("notionx-recovery") || "null"),
+  );
+  expect(recovered.pages.find((p: any) => p.id === fixture.note.id).title).toBe(
+    "latest edit before leaving",
+  );
+});
+
+for (const mobile of [false, true]) {
+  test(`${mobile ? "mobile" : "desktop"} clearing a date time keeps the date valid and later edits save`, async ({
+    page,
+    request,
+  }) => {
+    const field = {
+      ...fixture.fields[1],
+      id: fixture.prefix + "_clear_date",
+      name: "安排日期",
+      type: "date",
+      order: 5,
+      summary: "none",
+    };
+    const record = {
+      ...fixture.records[0],
+      values: {
+        ...fixture.records[0].values,
+        [field.id]: { start: "2026-10-23T09:30", end: "2026-10-24T18:00" },
+      },
+    };
+    await mutate(request, [set("fields", field), set("records", record)]);
+    if (mobile) await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#page=" + fixture.dbPage.id);
+    const row = page.locator(`[data-row-id="${record.id}"]`);
+    if (mobile)
+      await row.getByRole("button", { name: "打开记录", exact: true }).click();
+    const host = mobile
+      ? page.getByRole("dialog", { name: "记录详情", exact: true })
+      : row;
+    await host.getByRole("button", { name: "安排日期", exact: true }).click();
+    const calendar = mobile
+      ? page.getByRole("dialog", { name: "安排日期", exact: true })
+      : page.locator(".date-popover");
+    await calendar.getByLabel("开始时间", { exact: true }).fill("");
+    await calendar.getByLabel("结束时间", { exact: true }).fill("");
+    await calendar
+      .getByRole("button", { name: mobile ? "保存" : "完成", exact: true })
+      .click();
+    if (mobile)
+      await host.getByRole("button", { name: "关闭", exact: true }).click();
+    await saved(page);
+    await page.getByLabel("页面标题", { exact: true }).fill("date still saves");
+    await saved(page);
+    await expect(page.locator(".error-banner")).toHaveCount(0);
+    const state = await snapshot(request);
+    expect(
+      state.records.find((r: any) => r.id === record.id).values[field.id],
+    ).toEqual({ start: "2026-10-23", end: "2026-10-24" });
+    expect(state.pages.find((p: any) => p.id === fixture.dbPage.id).title).toBe(
+      "date still saves",
+    );
+  });
+}
+
+for (const kind of ["blockquote", "callout"]) {
+  for (const target of [
+    { label: "正文", tag: "p" },
+    { label: "标题 2", tag: "h2" },
+  ]) {
+    test(`${kind} conversion to ${target.tag} handles all paragraphs and undoes in one step`, async ({
+      page,
+      request,
+    }) => {
+      const paragraph = (text: string) => ({
+        type: "paragraph",
+        content: [{ type: "text", text }],
+      });
+      await mutate(request, [
+        set("pages", {
+          ...fixture.note,
+          content: {
+            type: "doc",
+            content: [
+              {
+                type: kind,
+                content: [
+                  paragraph("inside first"),
+                  paragraph("inside second"),
+                ],
+              },
+              paragraph("outside stays"),
+            ],
+          },
+        }),
+      ]);
+      await page.goto("/#page=" + fixture.note.id);
+      const editor = page.locator(".block-editor").first();
+      const wrapper = kind === "callout" ? "aside" : "blockquote";
+      await editor.locator(wrapper).hover();
+      await page
+        .getByRole("button", { name: "拖动内容块", exact: true })
+        .click();
+      await page.getByRole("menuitem", { name: /转换为/ }).hover();
+      await page
+        .getByRole("menuitem", { name: target.label, exact: true })
+        .click();
+      await expect(editor.locator(wrapper)).toHaveCount(0);
+      await expect(editor.locator(":scope > *")).toHaveText([
+        "inside first",
+        "inside second",
+        "outside stays",
+      ]);
+      if (target.tag === "h2")
+        await expect(editor.locator(":scope > h2")).toHaveText([
+          "inside first",
+          "inside second",
+        ]);
+      await expect(editor.locator(":scope > p").last()).toHaveText(
+        "outside stays",
+      );
+      await page.keyboard.press(`${mod}+z`);
+      await expect(editor.locator(wrapper + " > p")).toHaveText([
+        "inside first",
+        "inside second",
+      ]);
+      await page.keyboard.press(`${mod}+Shift+z`);
+      await expect(editor.locator(wrapper)).toHaveCount(0);
+      await saved(page);
+      await page.reload();
+      await expect(editor.locator(wrapper)).toHaveCount(0);
+      await expect(editor.locator(":scope > *")).toHaveText([
+        "inside first",
+        "inside second",
+        "outside stays",
+      ]);
+    });
+  }
+}
+
+for (const source of ["drop", "paste"] as const) {
+  test(`image ${source} keeps its original target while file reads and editing continue`, async ({
+    page,
+    request,
+  }) => {
+    await mutate(request, [
+      set("pages", {
+        ...fixture.note,
+        content: {
+          type: "doc",
+          content: ["AAA", "BBB", "CCC", "DDD"].map((text) => ({
+            type: "paragraph",
+            content: [{ type: "text", text }],
+          })),
+        },
+      }),
+    ]);
+    await page.addInitScript(() => {
+      const read = FileReader.prototype.readAsDataURL;
+      (window as any).releaseImageReads = () => {
+        for (const pending of (window as any).imageReads.splice(0)) pending();
+      };
+      (window as any).imageReads = [];
+      FileReader.prototype.readAsDataURL = function (blob) {
+        (window as any).imageReads.push(() => read.call(this, blob));
+      };
+    });
+    await page.goto("/#page=" + fixture.note.id);
+    const editor = page.locator(".block-editor").first();
+    const paragraphs = editor.locator(":scope > p");
+    await paragraphs.first().click();
+    await page.keyboard.press("Home");
+    if (source === "paste") {
+      for (let i = 0; i < 3; i++) await page.keyboard.press("Shift+ArrowRight");
+      expect(
+        await page.evaluate(() => document.getSelection()?.toString()),
+      ).toBe("AAA");
+    }
+    const last = await paragraphs.last().boundingBox();
+    await editor.evaluate(
+      (el, { source, x, y }) => {
+        const bin = atob(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jp1sAAAAASUVORK5CYII=",
+        );
+        const data = new DataTransfer();
+        data.items.add(
+          new File(
+            [Uint8Array.from(bin, (c) => c.charCodeAt(0))],
+            "target.png",
+            { type: "image/png" },
+          ),
+        );
+        el.dispatchEvent(
+          source === "drop"
+            ? new DragEvent("drop", {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+                dataTransfer: data,
+              })
+            : new ClipboardEvent("paste", {
+                bubbles: true,
+                cancelable: true,
+                clipboardData: data,
+              }),
+        );
+      },
+      { source, x: last!.x + 1, y: last!.y + last!.height / 2 },
+    );
+    expect(await page.evaluate(() => (window as any).imageReads.length)).toBe(
+      1,
+    );
+    if (source === "drop") {
+      await paragraphs.first().click();
+      await page.keyboard.press("Home");
+      await page.keyboard.type("prefix");
+    } else {
+      await paragraphs.last().click();
+      await page.keyboard.press("End");
+      await page.keyboard.type("suffix");
+    }
+    await page.evaluate(() => (window as any).releaseImageReads());
+    const image = editor.locator("img[alt='target.png']");
+    await expect(image).toHaveCount(1);
+    if (source === "drop") {
+      await expect(paragraphs.first()).toHaveText("prefixAAA");
+      expect(
+        await image.evaluate((el) => el.previousElementSibling?.textContent),
+      ).toBe("CCC");
+      expect(
+        await image.evaluate((el) => el.nextElementSibling?.textContent),
+      ).toBe("DDD");
+    } else {
+      await expect(editor).not.toContainText("AAA");
+      await expect(paragraphs.last()).toHaveText("DDDsuffix");
+      const followingText = await image.evaluate((el) =>
+        Array.from(el.parentElement!.children)
+          .slice(Array.from(el.parentElement!.children).indexOf(el) + 1)
+          .map((node) => node.textContent),
+      );
+      expect(followingText).toContain("BBB");
+    }
+    await saved(page);
+    await page.reload();
+    await expect(image).toHaveCount(1);
+  });
+}
+
 test("block editing, slash menu, ordinary table, and content survive reload", async ({
   page,
   request,
@@ -181,6 +542,7 @@ test("typed cells, keyboard navigation, decimal formulas, rename references, fil
   );
   const first = page.locator(`[data-row-id="${fixture.records[0].id}"]`);
   await first.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Enter");
   await first.getByRole("textbox", { name: "数量", exact: true }).fill("4");
   await page.keyboard.press("Tab");
   await expect(
@@ -317,10 +679,10 @@ test("database creation template, trash and restore keep the created database in
 }) => {
   await page.goto("/#page=" + fixture.note.id);
   await page.getByRole("button", { name: "添加页面", exact: true }).click();
-  await page.getByRole("button", { name: "数据库 结构化整理与计算" }).click();
-  await page.getByLabel("数据库名称").fill("测试预算模板");
+  await page.getByRole("button", { name: "数据表格 结构化整理与计算" }).click();
+  await page.getByLabel("数据表格名称").fill("测试预算模板");
   await selectValue(page, "从模板开始", "budget");
-  await page.getByRole("button", { name: "创建数据库", exact: true }).click();
+  await page.getByRole("button", { name: "创建数据表格", exact: true }).click();
   await expect(
     page.getByRole("textbox", { name: "页面标题", exact: true }),
   ).toHaveValue("测试预算模板");
@@ -361,9 +723,9 @@ test("embedded database shares records with its original page", async ({
   await page.goto("/#page=" + fixture.note.id);
   await page.locator(".block-editor").first().click();
   await page.keyboard.type("/database");
-  await page.getByRole("option", { name: "数据库", exact: false }).click();
+  await page.getByRole("option", { name: "数据表格", exact: false }).click();
   await page
-    .getByRole("dialog", { name: "嵌入数据库" })
+    .getByRole("dialog", { name: "嵌入数据表格" })
     .getByRole("button", { name: "验证账本", exact: false })
     .click();
   await expect(page.locator(".embedded")).toBeVisible();
@@ -514,11 +876,11 @@ test("mobile date ranges with time save and reload", async ({
     .getByRole("button", { name: "安排日期", exact: true })
     .click();
   const sheet = page.getByRole("dialog", { name: "安排日期", exact: true });
-  await sheet.getByLabel("包含时间").check();
-  await sheet.getByLabel("开始日期", { exact: true }).fill("2026-10-23T09:30");
-  await sheet
-    .getByLabel("结束日期（可选）", { exact: true })
-    .fill("2026-10-24T18:00");
+  await sheet.getByLabel("具体时间").check();
+  await sheet.getByLabel("启用结束日期").check();
+  await sheet.getByRole("button", { name: /2026年10月23日/ }).click();
+  await sheet.getByRole("button", { name: /2026年10月24日/ }).click();
+  await sheet.getByLabel("开始时间").fill("09:30");
   await sheet.getByRole("button", { name: "保存", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "记录详情" })).toContainText(
     "2026-10-23T09:30",
@@ -534,6 +896,131 @@ test("mobile date ranges with time save and reload", async ({
       field.id
     ],
   ).toEqual({ start: "2026-10-23T09:30", end: "2026-10-24T18:00" });
+});
+
+test("date picker keeps single dates single, and enables ranges and times explicitly", async ({
+  page,
+  request,
+}) => {
+  const field = {
+    ...fixture.fields[1],
+    id: fixture.prefix + "_date_semantics",
+    name: "安排日期",
+    type: "date",
+    order: 6,
+    summary: "none",
+  };
+  const record = {
+    ...fixture.records[0],
+    values: { ...fixture.records[0].values, [field.id]: "2026-10-20" },
+  };
+  await mutate(request, [set("fields", field), set("records", record)]);
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const row = page.locator(`[data-row-id="${record.id}"]`);
+  const open = async () => {
+    await row.getByRole("button", { name: "安排日期", exact: true }).click();
+    const popover = page.locator(".date-popover.range-popover");
+    await expect(popover.locator(".rdp-root")).toBeVisible();
+    return popover;
+  };
+  const finish = async (popover: any) => {
+    await popover.getByRole("button", { name: "完成", exact: true }).click();
+    await saved(page);
+  };
+
+  let popover = await open();
+  await popover.getByRole("button", { name: /2026年10月21日/ }).click();
+  await finish(popover);
+  await expect(
+    row.getByRole("button", { name: "安排日期", exact: true }),
+  ).toContainText("2026-10-21");
+  let state = await snapshot(request);
+  expect(
+    state.records.find((item: any) => item.id === record.id).values[field.id],
+  ).toBe("2026-10-21");
+
+  // A single click remains a single date, not a same-day range.
+  popover = await open();
+  await popover.getByRole("button", { name: /2026年10月22日/ }).click();
+  await finish(popover);
+  state = await snapshot(request);
+  expect(
+    state.records.find((item: any) => item.id === record.id).values[field.id],
+  ).toBe("2026-10-22");
+
+  // Enabling time adds the default start time to the single date.
+  popover = await open();
+  await popover.getByRole("button", { name: /2026年10月23日/ }).click();
+  await popover.getByLabel("具体时间").check();
+  await finish(popover);
+  state = await snapshot(request);
+  expect(
+    state.records.find((item: any) => item.id === record.id).values[field.id],
+  ).toBe("2026-10-23T09:00");
+
+  // Enabling the end date starts a range; the next click sets its end.
+  popover = await open();
+  await popover.getByLabel("启用结束日期").check();
+  await popover.getByRole("button", { name: /2026年10月25日/ }).click();
+  await expect(
+    popover.getByLabel("结束日期", { exact: true }),
+  ).toHaveValue("2026-10-25");
+  await finish(popover);
+  state = await snapshot(request);
+  expect(
+    state.records.find((item: any) => item.id === record.id).values[field.id],
+  ).toEqual({ start: "2026-10-23T09:00", end: "2026-10-25T18:00" });
+
+  // Cancel discards the draft.
+  popover = await open();
+  await popover.getByRole("button", { name: /2026年10月26日/ }).click();
+  await popover.getByRole("button", { name: "取消", exact: true }).click();
+  state = await snapshot(request);
+  expect(
+    state.records.find((item: any) => item.id === record.id).values[field.id],
+  ).toEqual({ start: "2026-10-23T09:00", end: "2026-10-25T18:00" });
+});
+
+test("desktop date cell uses a calendar popover and saves a date range", async ({
+  page,
+  request,
+}) => {
+  const field = {
+    ...fixture.fields[1],
+    id: fixture.prefix + "_desktop_date",
+    name: "安排日期",
+    type: "date",
+    order: 6,
+    summary: "none",
+  };
+  await mutate(request, [set("fields", field)]);
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const row = page.locator(`[data-row-id="${fixture.records[0].id}"]`);
+  await row.getByRole("button", { name: "安排日期", exact: true }).click();
+  const popover = page.locator(".date-popover");
+  await expect(popover.locator(".rdp-root")).toBeVisible();
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const day = String(month).padStart(2, "0");
+  await popover.getByLabel("启用结束日期").check();
+  await popover
+    .getByRole("button", { name: new RegExp(`${year}年${month}月1日`) })
+    .click();
+  await popover
+    .getByRole("button", { name: new RegExp(`${year}年${month}月2日`) })
+    .click();
+  await popover.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(
+    row.getByRole("button", { name: "安排日期", exact: true }),
+  ).toContainText(`${year}-${day}-01 → ${year}-${day}-02`);
+  await saved(page);
+  const state = await snapshot(request);
+  expect(
+    state.records.find((r: any) => r.id === fixture.records[0].id).values[
+      field.id
+    ],
+  ).toEqual({ start: `${year}-${day}-01`, end: `${year}-${day}-02` });
 });
 
 test("mobile on ordinary HTTP can create records without randomUUID", async ({
@@ -621,12 +1108,13 @@ test("block gutter stays reachable, list item menu acts on one item, drag has fe
   await page.getByRole("menuitem", { name: "复制此块" }).click();
   await expect(editor.locator("li")).toHaveCount(3);
   await expect(editor.locator("li").nth(1)).toHaveText("列表甲");
-  await page.getByRole("button", { name: "块操作", exact: true }).click();
+  await editor.locator("li").nth(1).hover();
+  await handle.click();
   await page.getByRole("menuitem", { name: "删除此块", exact: true }).click();
   await expect(editor.locator("li")).toHaveCount(2);
-  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await page.keyboard.press(`${mod}+z`);
   await expect(editor.locator("li")).toHaveCount(3);
-  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await page.keyboard.press(`${mod}+z`);
   await expect(editor.locator("li")).toHaveCount(2);
   await editor.getByText("第一块内容", { exact: true }).hover();
   const grip = await handle.boundingBox();
@@ -673,12 +1161,321 @@ test("block gutter stays reachable, list item menu acts on one item, drag has fe
   });
   await page.mouse.up();
   await expect(editor.locator(":scope > p").first()).toHaveText("第二块内容");
-  await page.getByRole("button", { name: "撤销", exact: true }).click();
+  await page.keyboard.press(`${mod}+z`);
   await expect(editor.locator(":scope > p").first()).toHaveText("第一块内容");
   await page.screenshot({
     path: "test-results/editor-interactions.png",
     fullPage: true,
   });
+});
+
+test("block handle appears from the left gutter and turn-into converts the block", async ({
+  page,
+  request,
+}) => {
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "第一块内容" }],
+          },
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "第二块内容" }],
+          },
+        ],
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const handle = page.getByRole("button", {
+    name: "拖动内容块",
+    exact: true,
+  });
+  await expect(handle).toHaveCount(0);
+  const editorBox = await editor.boundingBox();
+  const second = await editor.locator(":scope > p").nth(1).boundingBox();
+  await page.mouse.move(editorBox!.x - 24, second!.y + 8);
+  await expect(handle).toBeVisible();
+  await handle.click();
+  await page.getByRole("menuitem", { name: /转换为/ }).hover();
+  await page.getByRole("menuitem", { name: "标题 2", exact: true }).click();
+  await expect(editor.locator("h2")).toHaveText("第二块内容");
+});
+
+test("gutter selects whole blocks while text drags remain precise", async ({
+  page,
+  request,
+}) => {
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: ["第一段文字内容", "第二段文字内容", "第三段文字内容"].map(
+          (text) => ({
+            type: "paragraph",
+            content: [{ type: "text", text }],
+          }),
+        ),
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const blocks = editor.locator(":scope > p");
+  const toolbar = page.locator(".editor-toolbar").first();
+
+  // A selection inside one block stays a normal text selection.
+  await blocks.first().click();
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
+  await expect(editor.locator(".block-selected")).toHaveCount(0);
+  await expect(toolbar).toBeVisible();
+
+  // Dragging in the gutter selects whole blocks without changing text semantics.
+  await blocks.first().click();
+  const first = await blocks.first().boundingBox();
+  const third = await blocks.nth(2).boundingBox();
+  await page.mouse.move(first!.x - 2, first!.y + first!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(third!.x - 2, third!.y + third!.height / 2, {
+    steps: 15,
+  });
+  await page.mouse.up();
+  await expect(editor.locator(".block-selected")).toHaveCount(3);
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+  await page.screenshot({ path: "test-results/block-selection.png" });
+
+  // Delete and undo work on the whole block selection.
+  await page.keyboard.press("Backspace");
+  await expect(editor.locator(":scope > *")).toHaveCount(1);
+  await expect(editor).toHaveText("");
+  await page.keyboard.press(`${mod}+z`);
+  await expect(blocks).toHaveCount(3);
+
+  // Select all blocks, then typing replaces the whole block selection.
+  await blocks.first().click();
+  await page.keyboard.press(`${mod}+a`);
+  await page.keyboard.press(mod + "+a");
+  await expect(editor.locator(".block-selected")).toHaveCount(3);
+  await page.keyboard.type("替换文字");
+  await expect(editor.locator(":scope > *")).toHaveCount(1);
+  await expect(editor).toHaveText("替换文字");
+});
+
+test("list has a separate handle that moves the complete list", async ({
+  page,
+  request,
+}) => {
+  const paragraph = (text: string) => ({
+    type: "paragraph",
+    content: [{ type: "text", text }],
+  });
+  const item = (text: string) => ({
+    type: "listItem",
+    content: [paragraph(text)],
+  });
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: [
+          paragraph("before"),
+          { type: "bulletList", content: [item("one"), item("two")] },
+          paragraph("after"),
+        ],
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const list = editor.locator(":scope > ul");
+  await list.hover();
+  const handle = page.getByRole("button", {
+    name: "拖动整个列表",
+    exact: true,
+  });
+  await expect(handle).toBeVisible();
+  await list.locator(":scope > li").first().hover();
+  await expect(
+    page.getByRole("button", { name: "拖动内容块", exact: true }),
+  ).toBeVisible();
+  await list.hover();
+  const start = await handle.boundingBox();
+  const before = await editor.locator(":scope > p").first().boundingBox();
+  await page.mouse.move(
+    start!.x + start!.width / 2,
+    start!.y + start!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(before!.x + before!.width / 2, before!.y + 4, {
+    steps: 15,
+  });
+  await expect(page.locator(".block-drag-preview")).toContainText("one");
+  await expect(page.locator(".block-drag-preview")).toContainText("two");
+  await page.mouse.up();
+  await expect(editor.locator(":scope > *")).toHaveCount(3);
+  await expect(editor.locator(":scope > ul > li")).toHaveText(["one", "two"]);
+  await expect(editor.locator(":scope > p")).toHaveText(["before", "after"]);
+  await page.keyboard.press(`${mod}+z`);
+  await expect(editor.locator(":scope > *")).toHaveCount(3);
+  await expect(editor.locator(":scope > p")).toHaveText(["before", "after"]);
+  await expect(editor.locator(":scope > ul > li")).toHaveText(["one", "two"]);
+});
+
+test("flat list selections select whole items and clean up removed items", async ({
+  page,
+  request,
+}) => {
+  const text = (content: string) => ({
+    type: "text",
+    text: content,
+  });
+  const paragraph = (content: string) => ({
+    type: "paragraph",
+    content: [text(content)],
+  });
+  const item = (content: string) => ({
+    type: "listItem",
+    content: [paragraph(content)],
+  });
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: [
+          paragraph("前段"),
+          {
+            type: "bulletList",
+            content: [item("甲"), item("乙"), item("丙")],
+          },
+          paragraph("后段"),
+        ],
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const items = editor.locator(":scope > ul > li");
+
+  const dragItems = async (from: number, to: number) => {
+    await items.nth(from).locator("p").click();
+    await page.keyboard.press("Escape");
+    for (let i = from; i < to; i++)
+      await page.keyboard.press("Shift+ArrowDown");
+  };
+
+  await dragItems(0, 2);
+  await expect(editor.locator("li.block-selected")).toHaveCount(3);
+  await expect(editor.locator("ul.block-selected")).toHaveCount(0);
+  await page.screenshot({ path: "test-results/list-item-selection.png" });
+
+  await page.keyboard.press("Backspace");
+  await expect(editor.locator("ul")).toHaveCount(0);
+  await expect(editor.locator(":scope > p")).toHaveText(["前段", "后段"]);
+  await page.keyboard.press(`${mod}+z`);
+  await expect(editor.locator(":scope > ul > li")).toHaveCount(3);
+
+  await dragItems(0, 1);
+  await expect(editor.locator("li.block-selected")).toHaveCount(2);
+  await page.keyboard.press("Backspace");
+  await expect(editor.locator(":scope > ul > li")).toHaveCount(1);
+  await expect(editor.locator(":scope > ul > li")).toHaveText("丙");
+  await page.keyboard.press(`${mod}+z`);
+  await expect(editor.locator(":scope > ul > li")).toHaveCount(3);
+
+  await items.first().locator("p").click();
+  await page.keyboard.press(`${mod}+a`);
+  await page.keyboard.press(mod + "+a");
+  await expect(editor.locator(":scope > ul.block-selected")).toHaveCount(1);
+  await expect(editor.locator("li.block-selected")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(editor.locator(".block-selected")).toHaveCount(0);
+
+  await dragItems(0, 1);
+  await expect(editor.locator("li.block-selected")).toHaveCount(2);
+  await page.keyboard.down("Shift");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.up("Shift");
+  await expect(editor.locator("li.block-selected")).toHaveCount(3);
+});
+
+test("nested list selections use the closest list level", async ({
+  page,
+  request,
+}) => {
+  const text = (content: string) => ({
+    type: "text",
+    text: content,
+  });
+  const paragraph = (content: string) => ({
+    type: "paragraph",
+    content: [text(content)],
+  });
+  const item = (content: string, children: any[] = []) => ({
+    type: "listItem",
+    content: [paragraph(content), ...children],
+  });
+  await mutate(request, [
+    set("pages", {
+      ...fixture.note,
+      content: {
+        type: "doc",
+        content: [
+          {
+            type: "bulletList",
+            content: [
+              item("父A", [
+                {
+                  type: "bulletList",
+                  content: [item("子A1"), item("子A2")],
+                },
+              ]),
+              item("父B"),
+            ],
+          },
+        ],
+      },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  const nested = editor.locator("ul ul li");
+  const top = editor.locator(":scope > ul > li");
+
+  await nested.nth(0).locator("p").click();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect(editor.locator("li.block-selected")).toHaveCount(2);
+  await expect(editor.locator(":scope > ul > li.block-selected")).toHaveCount(
+    0,
+  );
+  await page.screenshot({ path: "test-results/nested-list-selection.png" });
+  await page.keyboard.press("Backspace");
+  await expect(editor.locator("ul ul")).toHaveCount(0);
+  await expect(top).toHaveCount(2);
+  await expect(top).toHaveText(["父A", "父B"]);
+  await page.keyboard.press(`${mod}+z`);
+  await expect(editor.locator("ul ul li")).toHaveCount(2);
+
+  await top.nth(0).locator(":scope > p").click();
+  await page.keyboard.press("Escape");
+  await expect(editor.locator(":scope > ul > li.block-selected")).toHaveCount(
+    1,
+  );
+  await page.keyboard.press("Backspace");
+  await expect(top).toHaveCount(1);
+  await expect(top).toHaveText("父B");
 });
 
 for (const kind of ["bulletList", "orderedList", "taskList"]) {
@@ -937,6 +1734,7 @@ test("cell Escape cancels without saving, invalid numbers stay editable, Tab ski
   await page.goto("/#page=" + fixture.dbPage.id);
   const row = page.locator(`[data-row-id="${fixture.records[0].id}"]`);
   await row.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Enter");
   await row.getByRole("textbox", { name: "数量", exact: true }).fill("999");
   await page.keyboard.press("Escape");
   await page.locator(".page-title").click();
@@ -944,6 +1742,7 @@ test("cell Escape cancels without saving, invalid numbers stay editable, Tab ski
     row.getByRole("button", { name: "数量", exact: true }),
   ).toHaveText("2");
   await row.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Enter");
   await row.getByRole("textbox", { name: "数量", exact: true }).fill("abc");
   await page.keyboard.press("Tab");
   await expect(
@@ -1244,7 +2043,7 @@ test("Radix property selector supports keyboard selection and Escape without cha
   await expect(page.locator("thead")).toContainText("新数值");
 });
 
-test("format toolbar follows the active block and scrolling, preserves selection and hides on blur", async ({
+test("format toolbar appears only for text selections, follows the selection and hides on blur", async ({
   page,
   request,
 }) => {
@@ -1267,17 +2066,28 @@ test("format toolbar follows the active block and scrolling, preserves selection
   await expect(toolbar).toHaveAttribute("aria-hidden", "true");
   const initial = await blocks.first().boundingBox();
   await blocks.first().click();
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
   await expect(toolbar).toBeVisible();
   await expect
     .poll(async () => (await toolbar.boundingBox())!.y)
     .toBeLessThan(initial!.y);
   expect((await blocks.first().boundingBox())!.y).toBe(initial!.y);
   const firstToolbarY = (await toolbar.boundingBox())!.y;
+
   await blocks.nth(5).click();
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
+  await expect(toolbar).toBeVisible();
   await expect
     .poll(async () => (await toolbar.boundingBox())!.y)
     .toBeGreaterThan(firstToolbarY + 100);
-  for (let i = 0; i < 4; i++) await page.keyboard.press("Shift+ArrowLeft");
   const selectedText = await page.evaluate(() =>
     document.getSelection()?.toString(),
   );
@@ -1285,21 +2095,19 @@ test("format toolbar follows the active block and scrolling, preserves selection
   await toolbar.getByRole("button", { name: "加粗", exact: true }).click();
   await expect(blocks.nth(5).locator("strong")).toHaveText(selectedText!);
   await expect(blocks.first().locator("strong")).toHaveCount(0);
-
-  await toolbar.getByRole("button", { name: "块操作", exact: true }).click();
   await expect(
-    page.getByRole("menuitem", { name: "复制此块", exact: true }),
-  ).toBeVisible();
-  await expect(toolbar).toBeVisible();
-  await page.keyboard.press("Escape");
+    toolbar.getByRole("button", { name: "块操作", exact: true }),
+  ).toHaveCount(0);
+
+  await page.keyboard.press("ArrowRight");
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+
   await blocks.nth(10).click();
-  await expect
-    .poll(async () => {
-      const bar = (await toolbar.boundingBox())!;
-      const block = (await blocks.nth(10).boundingBox())!;
-      return Math.abs(bar.y + bar.height + 8 - block.y);
-    })
-    .toBeLessThan(10);
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 4; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
+  await expect(toolbar).toBeVisible();
   const beforeScroll = await toolbar.boundingBox();
   await page.locator(".main-scroll").evaluate((el) => {
     el.scrollTop += 70;
@@ -1312,7 +2120,7 @@ test("format toolbar follows the active block and scrolling, preserves selection
   await expect(toolbar).toHaveAttribute("aria-hidden", "true");
 });
 
-test("mobile format toolbar follows blocks and fits the screen", async ({
+test("mobile format toolbar appears for selections and fits the screen", async ({
   page,
   request,
 }) => {
@@ -1333,15 +2141,19 @@ test("mobile format toolbar follows blocks and fits the screen", async ({
   const blocks = page.locator(".block-editor > p");
   const toolbar = page.locator(".editor-toolbar").first();
   await blocks.nth(6).click();
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
   await expect(toolbar).toBeVisible();
   const pos = await toolbar.boundingBox();
   expect(pos!.x).toBeGreaterThanOrEqual(0);
   expect(pos!.x + pos!.width).toBeLessThanOrEqual(390);
   expect(pos!.y).toBeGreaterThanOrEqual(56);
   expect(pos!.y + pos!.height).toBeLessThanOrEqual(640);
-  await toolbar.locator(".editor-type").click();
-  await page.getByRole("menuitem", { name: "标题 2", exact: false }).click();
-  await expect(page.locator(".block-editor h2")).toHaveText("手机段落 7");
+  await toolbar.getByRole("button", { name: "加粗", exact: true }).click();
+  await expect(blocks.nth(6).locator("strong")).not.toHaveText("");
   await expect(toolbar).toBeVisible();
   await page.screenshot({ path: "test-results/floating-toolbar-mobile.png" });
   await page.locator(".page-title").click();
@@ -1376,8 +2188,13 @@ test("format toolbar positions inside the record dialog and does not persist aft
     .getByRole("button", { name: "打开记录", exact: true })
     .click();
   const dialog = page.getByRole("dialog", { name: "记录详情" });
+  const toolbar = dialog.locator(".editor-toolbar");
   await dialog.getByText("记录正文的第二段", { exact: true }).click();
-  const toolbar = dialog.getByRole("toolbar", { name: "块格式工具栏" });
+  await expect(toolbar).toHaveAttribute("aria-hidden", "true");
+  await page.keyboard.press("Home");
+  await page.keyboard.down("Shift");
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.up("Shift");
   await expect(toolbar).toBeVisible();
   const bounds = await dialog.boundingBox();
   const pos = await toolbar.boundingBox();
@@ -1395,4 +2212,1018 @@ test("format toolbar positions inside the record dialog and does not persist aft
     "aria-hidden",
     "true",
   );
+});
+
+async function seedEditor(
+  page: any,
+  request: APIRequestContext,
+  content: any[],
+) {
+  await mutate(request, [
+    set("pages", { ...fixture.note, content: { type: "doc", content } }),
+  ]);
+  await page.goto("/#page=" + fixture.note.id);
+  const editor = page.locator(".block-editor").first();
+  await editor.waitFor();
+  return editor;
+}
+const paragraph = (text: string) => ({
+  type: "paragraph",
+  content: text ? [{ type: "text", text }] : [],
+});
+
+test("block Enter preserves content, shift selection shrinks, and select-all progresses", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [
+    paragraph("AAA"),
+    paragraph("BBB"),
+    paragraph("CCC"),
+    paragraph("DDD"),
+  ]);
+  await editor.locator("p").first().click();
+  await page.keyboard.press("Escape");
+  await expect(editor.locator(".block-selected")).toHaveText(["AAA"]);
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect(editor.locator(".block-selected")).toHaveText([
+    "AAA",
+    "BBB",
+    "CCC",
+  ]);
+  await page.keyboard.press("Shift+ArrowUp");
+  await expect(editor.locator(".block-selected")).toHaveText(["AAA", "BBB"]);
+  await page.keyboard.press("Enter");
+  await expect(editor.locator(".block-selected")).toHaveCount(0);
+  await expect(editor.locator("p")).toHaveText(["AAA", "BBB", "CCC", "DDD"]);
+  await page.keyboard.press(mod + "+a");
+  await expect(editor.locator(".block-selected")).toHaveText(["AAA"]);
+  await page.keyboard.press(mod + "+a");
+  await expect(editor.locator(".block-selected")).toHaveCount(4);
+  await page.keyboard.press("Enter");
+  await page.keyboard.press(mod + "+d");
+  await expect(editor.locator("p")).toHaveText([
+    "AAA",
+    "AAA",
+    "BBB",
+    "CCC",
+    "DDD",
+  ]);
+  await page.keyboard.press(mod + "+z");
+  await expect(editor.locator("p")).toHaveText(["AAA", "BBB", "CCC", "DDD"]);
+});
+
+test("slash commands ignore code and stay dismissed until the trigger changes", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [
+    { type: "codeBlock", content: [{ type: "text", text: "path = " }] },
+    paragraph(""),
+  ]);
+  await editor.evaluate((el: any) => {
+    el.editor.view.focus();
+    el.editor.commands.setTextSelection(8);
+  });
+  await page.keyboard.type("/");
+  await expect(page.locator(".slash-menu")).toHaveCount(0);
+  await page.keyboard.press("Enter");
+  await expect(editor.locator("pre")).toContainText("path = /");
+  await editor.locator(":scope > p").last().click();
+  await page.keyboard.type("/");
+  await expect(page.locator(".slash-menu")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.keyboard.type("text");
+  await expect(page.locator(".slash-menu")).toHaveCount(0);
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/");
+  await expect(page.locator(".slash-menu")).toBeVisible();
+});
+
+test("selected-text link shortcut opens link editing rather than global search", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [paragraph("link me")]);
+  await editor.evaluate((el: any) => {
+    el.editor.view.focus();
+    el.editor.commands.setTextSelection({ from: 1, to: 5 });
+  });
+  await page.keyboard.press(mod + "+k");
+  const dialog = page.getByRole("dialog", { name: "插入链接", exact: true });
+  await expect(dialog).toBeVisible();
+  await dialog
+    .locator('input[placeholder="https://…"]')
+    .fill("https://example.com");
+  await dialog.getByRole("button", { name: "应用链接", exact: true }).click();
+  await expect(editor.locator('a[href="https://example.com"]')).toHaveText(
+    "link",
+  );
+});
+
+test("database changes undo and redo after commit without overwriting record body", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const row = page.locator('[data-row-id="' + fixture.records[0].id + '"]');
+  await row.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Enter");
+  await row.getByRole("textbox", { name: "数量", exact: true }).fill("42");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Escape");
+  await saved(page);
+  await page.keyboard.press(mod + "+z");
+  await expect(
+    row.getByRole("button", { name: "数量", exact: true }),
+  ).toHaveText("2");
+  await saved(page);
+  await page.keyboard.press(mod + "+Shift+z");
+  await expect(
+    row.getByRole("button", { name: "数量", exact: true }),
+  ).toHaveText("42");
+  await row.getByRole("button", { name: "打开记录", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "记录详情", exact: true });
+  await dialog.locator(".block-editor").fill("正文要保留");
+  await saved(page);
+  await dialog
+    .getByRole("button", { name: "撤销数据表格操作", exact: true })
+    .click();
+  await expect(dialog.locator(".block-editor")).toHaveText("正文要保留");
+  await expect(
+    dialog.getByRole("button", { name: "数量", exact: true }),
+  ).toHaveText("2");
+  await saved(page);
+  const data = await snapshot(request);
+  expect(
+    data.records.find((r: any) => r.id === fixture.records[0].id).content
+      .content[0].content[0].text,
+  ).toBe("正文要保留");
+});
+
+test("record property Tab and Shift Tab navigate inside the details panel", async ({
+  page,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  await page
+    .locator('[data-row-id="' + fixture.records[0].id + '"]')
+    .getByRole("button", { name: "打开记录", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "记录详情", exact: true });
+  await dialog.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Tab");
+  await expect(
+    dialog.getByRole("textbox", { name: "单价", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(
+    dialog.getByRole("textbox", { name: "数量", exact: true }),
+  ).toBeFocused();
+});
+
+test("historical date opens in its month and supports direct date editing", async ({
+  page,
+  request,
+}) => {
+  const date = {
+    ...fixture.fields[1],
+    id: fixture.prefix + "_date",
+    name: "日期",
+    type: "date",
+    order: 5,
+    summary: "none",
+  };
+  await mutate(request, [
+    set("fields", date),
+    set("records", {
+      ...fixture.records[0],
+      values: { ...fixture.records[0].values, [date.id]: "2020-01-02" },
+    }),
+  ]);
+  await page.goto("/#page=" + fixture.dbPage.id);
+  await page
+    .locator('[data-row-id="' + fixture.records[0].id + '"]')
+    .getByRole("button", { name: "日期", exact: true })
+    .click();
+  const popover = page.locator(".date-popover");
+  await expect(popover.locator(".rdp-years_dropdown")).toHaveValue("2020");
+  await expect(popover.locator(".rdp-months_dropdown")).toHaveValue("0");
+  await popover.getByLabel("开始日期", { exact: true }).fill("2019-12-31");
+  await popover.getByRole("button", { name: "完成", exact: true }).click();
+  await saved(page);
+  expect(
+    (await snapshot(request)).records.find(
+      (r: any) => r.id === fixture.records[0].id,
+    ).values[date.id],
+  ).toBe("2019-12-31");
+});
+
+test("table controls stay beside a table in a long page", async ({
+  page,
+  request,
+}) => {
+  const cell = (text: string) => ({
+    type: "tableCell",
+    content: [paragraph(text)],
+  });
+  const editor = await seedEditor(page, request, [
+    {
+      type: "table",
+      content: [
+        { type: "tableRow", content: [cell("A"), cell("B")] },
+        { type: "tableRow", content: [cell("C"), cell("D")] },
+      ],
+    },
+    ...Array.from({ length: 50 }, (_, i) => paragraph("long " + i)),
+  ]);
+  await editor.locator("td").first().click();
+  const tools = page.getByRole("toolbar", { name: "表格操作", exact: true });
+  await expect(tools).toBeVisible();
+  const bounds = await tools.boundingBox();
+  expect(bounds!.y).toBeGreaterThan(0);
+  expect(bounds!.y + bounds!.height).toBeLessThan(1000);
+  await tools.locator("button").first().click();
+  await expect(editor.locator("tr")).toHaveCount(3);
+  await page.getByRole("textbox", { name: "页面标题", exact: true }).focus();
+  await expect(tools).not.toBeVisible();
+  await editor.locator("td").first().click();
+  await tools.getByRole("button", { name: "更多表格操作" }).click();
+  await page
+    .getByRole("menuitem", { name: "在上方插入行", exact: true })
+    .click();
+  await expect(editor.locator("tr")).toHaveCount(4);
+  await page.screenshot({ path: "test-results/contextual-table-tools.png" });
+});
+
+test("mobile block controls fit and editing tools insert at the caret", async ({
+  page,
+  request,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const editor = await seedEditor(page, request, [
+    paragraph("AAA"),
+    paragraph("BBB"),
+    paragraph("CCC"),
+  ]);
+  await editor.locator("p").nth(1).click();
+  await page.keyboard.press("Escape");
+  const handle = page.getByRole("button", { name: "拖动内容块", exact: true });
+  await expect(handle).toBeVisible();
+  const bounds = await handle.boundingBox();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+  await page.keyboard.press("Enter");
+  const tools = page.getByRole("toolbar", {
+    name: "手机编辑工具",
+    exact: true,
+  });
+  await expect(tools).toBeVisible();
+  await tools
+    .getByRole("button", { name: "在当前位置添加内容", exact: true })
+    .click();
+  await expect(editor.locator("p").first()).toHaveText("AAA");
+  await expect(editor.locator("p").nth(1)).toHaveText("/BBB");
+  await expect(editor.locator("p").last()).toHaveText("CCC");
+  await page.screenshot({ path: "test-results/mobile-editing-tools.png" });
+});
+
+test("list item can move outside its list with visible placement and single undo", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [
+    {
+      type: "bulletList",
+      content: [
+        { type: "listItem", content: [paragraph("A")] },
+        { type: "listItem", content: [paragraph("B")] },
+      ],
+    },
+    paragraph("outside"),
+  ]);
+  await editor.locator("li").first().hover();
+  const h = await page
+    .getByRole("button", { name: "拖动内容块", exact: true })
+    .boundingBox();
+  const target = await editor.locator(":scope > p").first().boundingBox();
+  await page.mouse.move(h!.x + 10, h!.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(target!.x + 20, target!.y + target!.height - 2, {
+    steps: 15,
+  });
+  await expect(page.locator(".drag-insertion-guide")).toBeVisible();
+  await page.mouse.up();
+  await expect(editor.locator(":scope > p")).toHaveText(["outside", "A"]);
+  await expect(editor.locator("li")).toHaveText(["B"]);
+  await page.keyboard.press(mod + "+z");
+  await expect(editor.locator("li")).toHaveText(["A", "B"]);
+});
+
+test("database rectangular keyboard selection copies and clears values with undo", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const row = page.locator('[data-row-id="' + fixture.records[0].id + '"]');
+  const cell = row.locator('td[data-field-id="' + fixture.fields[1].id + '"]');
+  await row.getByRole("button", { name: "数量", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await cell.focus();
+  await page.keyboard.press("Shift+ArrowRight");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(4);
+  await page.keyboard.press("Shift+ArrowLeft");
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(2);
+  await page.keyboard.press("Shift+ArrowRight");
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(4);
+  const copied = await page.evaluate(() => {
+    const transfer = new DataTransfer();
+    document.activeElement?.dispatchEvent(
+      new ClipboardEvent("copy", {
+        clipboardData: transfer,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    return transfer.getData("text/plain");
+  });
+  expect(copied).toBe("2\t¥0.10\n3\t¥0.20");
+  await page.keyboard.press("Delete");
+  await saved(page);
+  const cleared = await snapshot(request);
+  for (const record of fixture.records)
+    expect(
+      cleared.records.find((r: any) => r.id === record.id).values[
+        fixture.fields[1].id
+      ],
+    ).toBeNull();
+  await page.keyboard.press(mod + "+z");
+  await saved(page);
+  const restored = await snapshot(request);
+  expect(
+    restored.records.find((r: any) => r.id === fixture.records[0].id).values[
+      fixture.fields[1].id
+    ],
+  ).toBe(2);
+});
+
+test("clicking outside the table or on the header clears cell selection", async ({
+  page,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const cell = page.locator(
+    `[data-row-id="${fixture.records[0].id}"] td[data-field-id="${fixture.fields[1].id}"] button.cell-value`,
+  );
+  await cell.click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await page.locator(".page-title").click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(0);
+
+  await cell.click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(0);
+
+  await cell.click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await page
+    .locator(`thead th[data-field-id="${fixture.fields[1].id}"] .column-heading button`)
+    .click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  await cell.click();
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(0);
+});
+
+test("database mouse range selects cells without opening editors and supports shift click", async ({
+  page,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const cell = (row: number, column: number) =>
+    page.locator(
+      `[data-row-id="${fixture.records[row].id}"] td[data-field-id="${fixture.fields[column].id}"]`,
+    );
+  const from = await cell(0, 1).boundingBox();
+  const to = await cell(1, 2).boundingBox();
+  await page.mouse.move(from!.x + 20, from!.y + 20);
+  await page.mouse.down();
+  await page.mouse.move(to!.x + 20, to!.y + 20, { steps: 10 });
+  await page.mouse.up();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(4);
+  await expect(page.locator(".data-table .cell-text input")).toHaveCount(0);
+  await expect(cell(1, 2)).toHaveCSS("background-color", "rgb(233, 241, 252)");
+  await page.screenshot({ path: "test-results/database-range-selection.png" });
+  await cell(0, 1).click({ modifiers: ["Shift"] });
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await cell(1, 2).click({ modifiers: ["Shift"] });
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(4);
+  await expect(page.locator(".data-table .cell-text input")).toHaveCount(0);
+});
+
+test("cell click selects, typing edits, and fill handle copies values down", async ({
+  page,
+  request,
+}) => {
+  const third = {
+    ...fixture.records[0],
+    id: fixture.prefix + "_r3",
+    order: 2,
+    values: {
+      ...fixture.records[0].values,
+      [fixture.fields[1].id]: 4,
+    },
+  };
+  await mutate(request, [set("records", third)]);
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const ids = [fixture.records[0].id, fixture.records[1].id, third.id];
+  const row = (index: number) =>
+    page.locator(`[data-row-id="${ids[index]}"]`);
+  const qty = (index: number) =>
+    row(index).locator(`td[data-field-id="${fixture.fields[1].id}"]`);
+
+  await qty(0).locator("button.cell-value").click();
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await expect(page.locator(".data-table .cell-text input")).toHaveCount(0);
+  await expect(page.locator(".fill-handle")).toBeVisible();
+
+  await page.keyboard.type("4");
+  await expect(
+    row(0).getByRole("textbox", { name: "数量", exact: true }),
+  ).toHaveValue("4");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Enter");
+  await expect(
+    row(0).getByRole("textbox", { name: "数量", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
+
+  await page.keyboard.press("ArrowDown");
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(1);
+  await expect(
+    qty(1).locator("button.cell-value"),
+  ).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+
+  const handle = page.locator(".fill-handle");
+  const from = await handle.boundingBox();
+  const to = await qty(2).boundingBox();
+  await page.mouse.move(from!.x + from!.width / 2, from!.y + from!.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(to!.x + to!.width / 2, to!.y + to!.height - 5, {
+    steps: 8,
+  });
+  await expect(page.locator(".grid-cell-selected")).toHaveCount(3);
+  await expect(page.locator(".fill-handle-tip")).toHaveCSS("opacity", "1");
+  await page.screenshot({ path: "test-results/database-fill-preview.png" });
+  await page.mouse.up();
+  await saved(page);
+  const filled = await snapshot(request);
+  expect(
+    ids.map(
+      (id) =>
+        filled.records.find((record: any) => record.id === id).values[
+          fixture.fields[1].id
+        ],
+    ),
+  ).toEqual([2, 2, 2]);
+  await expect(page.getByRole("button", { name: "数量汇总" })).toContainText(
+    "6",
+  );
+
+  await page
+    .getByRole("button", { name: "撤销数据表格操作", exact: true })
+    .first()
+    .click();
+  await saved(page);
+  const restored = await snapshot(request);
+  expect(
+    ids.map(
+      (id) =>
+        restored.records.find((record: any) => record.id === id).values[
+          fixture.fields[1].id
+        ],
+    ),
+  ).toEqual([2, 3, 4]);
+});
+
+test("grouped database selection follows visible rows and skips collapsed groups", async ({
+  page,
+  request,
+}) => {
+  const third = { ...fixture.records[0], id: fixture.prefix + "_r3", order: 2 };
+  await mutate(request, [
+    set("records", third),
+    set("views", { ...fixture.view, groupBy: fixture.fields[4].id }),
+  ]);
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const cell = (id: string) =>
+    page.locator(
+      `[data-row-id="${id}"] td[data-field-id="${fixture.fields[1].id}"]`,
+    );
+  await cell(fixture.records[0].id).focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(
+    cell(third.id).locator("button.cell-value"),
+  ).toBeFocused();
+  await page.locator(".group-row button").first().click();
+  await expect(cell(third.id)).toHaveCount(0);
+  await cell(fixture.records[1].id).focus();
+  await page.keyboard.press("ArrowUp");
+  await expect(
+    cell(fixture.records[1].id).locator("button.cell-value"),
+  ).toBeFocused();
+});
+
+test("multi-block drag keeps the group intact and supports menu conversion", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [
+    paragraph("A"),
+    paragraph("B"),
+    paragraph("C"),
+    paragraph("D"),
+  ]);
+  await editor.locator("p").first().click();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Shift+ArrowDown");
+  await expect(editor.locator(".block-selected")).toHaveText(["A", "B"]);
+  const h = await page
+      .getByRole("button", { name: "拖动内容块", exact: true })
+      .boundingBox(),
+    t = await editor.locator("p").last().boundingBox();
+  await page.mouse.move(h!.x + 10, h!.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(t!.x + 20, t!.y + t!.height - 1, { steps: 15 });
+  await expect(page.locator(".block-drag-preview")).toContainText("A");
+  await expect(page.locator(".block-drag-preview")).toContainText("B");
+  await page.mouse.up();
+  await expect(editor.locator("p")).toHaveText(["C", "D", "A", "B"]);
+  await page.keyboard.press(mod + "+z");
+  await expect(editor.locator("p")).toHaveText(["A", "B", "C", "D"]);
+  await editor.locator("p").first().click();
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("Shift+ArrowDown");
+  await page.keyboard.press(mod + "+/");
+  await page.getByRole("menuitem", { name: /转换为/ }).hover();
+  await page.getByRole("menuitem", { name: "标题 2", exact: true }).click();
+  await expect(editor.locator("h2")).toHaveText(["A", "B"]);
+});
+
+test("single remaining list item can leave its container and nested drops undo", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [
+    {
+      type: "bulletList",
+      content: [{ type: "listItem", content: [paragraph("A")] }],
+    },
+    paragraph("outside"),
+  ]);
+  const drag = async (source: any, target: any, indent = 20) => {
+    await source.hover();
+    const h = await page
+        .getByRole("button", { name: "拖动内容块", exact: true })
+        .boundingBox(),
+      t = await target.boundingBox();
+    await page.mouse.move(h!.x + 10, h!.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(t!.x + indent, t!.y + t!.height - 2, { steps: 15 });
+    await page.mouse.up();
+  };
+  await drag(editor.locator("li"), editor.locator(":scope > p"));
+  await expect(editor.locator("ul")).toHaveCount(0);
+  await expect(editor.locator("p")).toHaveText(["outside", "A"]);
+  await page.keyboard.press(mod + "+z");
+  await expect(editor.locator("li")).toHaveText("A");
+  await editor.evaluate((el: any) =>
+    el.editor.commands.setContent({
+      type: "doc",
+      content: [
+        {
+          type: "bulletList",
+          content: [
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "A" }] },
+              ],
+            },
+            {
+              type: "listItem",
+              content: [
+                { type: "paragraph", content: [{ type: "text", text: "B" }] },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  await editor.locator("li").nth(1).hover();
+  const h = await page
+      .getByRole("button", { name: "拖动内容块", exact: true })
+      .boundingBox(),
+    t = await editor.locator("li").first().boundingBox();
+  await page.mouse.move(h!.x + 10, h!.y + 10);
+  await page.mouse.down();
+  await page.mouse.move(t!.x + 120, t!.y + 13, { steps: 15 });
+  await expect(page.locator(".drag-insertion-guide")).toHaveAttribute(
+    "data-label",
+    "嵌套到此项",
+  );
+  await page.mouse.up();
+  await expect(editor.locator("ul ul li")).toHaveText("B");
+  await page.keyboard.press(mod + "+z");
+  await expect(editor.locator(":scope > ul > li")).toHaveText(["A", "B"]);
+});
+
+test("deleting records is undoable as one database operation", async ({
+  page,
+  request,
+}) => {
+  await page.goto("/#page=" + fixture.dbPage.id);
+  const row = page.locator('[data-row-id="' + fixture.records[0].id + '"]');
+  await row.getByRole("checkbox").check();
+  await page
+    .locator(".selection-bar")
+    .getByRole("button", { name: "删除", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "确认删除", exact: true })
+    .click();
+  await expect(row).toHaveCount(0);
+  await saved(page);
+  await page
+    .getByRole("button", { name: "撤销数据表格操作", exact: true })
+    .click();
+  await expect(row).toBeVisible();
+  await saved(page);
+  expect(
+    (await snapshot(request)).records.find(
+      (r: any) => r.id === fixture.records[0].id,
+    ).values,
+  ).toEqual(fixture.records[0].values);
+});
+
+test("page references are searchable and display the current page name after rename", async ({
+  page,
+  request,
+}) => {
+  const editor = await seedEditor(page, request, [paragraph("")]);
+  await editor.click();
+  await page.keyboard.type("/");
+  await page.getByRole("option", { name: "页面链接", exact: false }).click();
+  const dialog = page.getByRole("dialog", { name: "插入链接", exact: true });
+  await dialog
+    .getByRole("textbox", { name: "搜索要引用的页面", exact: true })
+    .fill(fixture.dbPage.title);
+  await dialog
+    .locator(".choice-list button")
+    .filter({ hasText: fixture.dbPage.title })
+    .click();
+  await expect(editor.locator(".page-reference")).toHaveText(
+    fixture.dbPage.icon + " " + fixture.dbPage.title,
+  );
+  await saved(page);
+  await mutate(request, [
+    set("pages", { ...fixture.dbPage, title: "改名后的账本" }),
+  ]);
+  await page.reload();
+  await expect(editor.locator(".page-reference")).toHaveText(
+    fixture.dbPage.icon + " 改名后的账本",
+  );
+  await editor.locator(".page-reference a").click();
+  await expect(page.getByLabel("页面标题", { exact: true })).toHaveValue(
+    "改名后的账本",
+  );
+});
+
+test.describe("block handle first-line alignment", () => {
+  test.use({ hasTouch: true });
+  for (const width of [390, 1440]) {
+    test(
+      "handle stays centered on each first line at " + width + "px",
+      async ({ page, request }) => {
+        await page.setViewportSize({ width, height: 844 });
+        const editor = await seedEditor(page, request, [
+          paragraph("哈哈"),
+          paragraph("海拔"),
+          {
+            type: "heading",
+            attrs: { level: 1 },
+            content: [{ type: "text", text: "标题一" }],
+          },
+          {
+            type: "heading",
+            attrs: { level: 2 },
+            content: [{ type: "text", text: "标题二" }],
+          },
+          paragraph(
+            "跨行正文，用较长的文字确认手柄对齐第一行，而不是整块内容的中央。".repeat(
+              6,
+            ),
+          ),
+          {
+            type: "bulletList",
+            content: [
+              {
+                type: "listItem",
+                content: [
+                  paragraph("列表中的第一行"),
+                  paragraph("列表中的第二段"),
+                ],
+              },
+            ],
+          },
+          { type: "callout", content: [paragraph("提示块中的文字")] },
+        ]);
+        const targets = [
+          editor.locator(":scope > p").nth(0),
+          editor.locator(":scope > p").nth(1),
+          editor.locator("h1"),
+          editor.locator("h2"),
+          editor.locator(":scope > p").nth(2),
+          editor.locator("li p").first(),
+          editor.locator(".editor-callout p"),
+        ];
+        const handle = page.getByRole("button", {
+          name: "拖动内容块",
+          exact: true,
+        });
+        for (const target of targets) {
+          await target.tap();
+          await page.keyboard.press("Escape");
+          await expect(handle).toBeVisible();
+          const lineCenter = await target.evaluate((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return (
+              rect.top +
+              parseFloat(style.borderTopWidth) +
+              parseFloat(style.paddingTop) +
+              parseFloat(style.lineHeight) / 2
+            );
+          });
+          const box = (await handle.boundingBox())!;
+          expect(Math.abs(box.y + box.height / 2 - lineCenter)).toBeLessThan(1);
+          expect(box.x).toBeGreaterThanOrEqual(0);
+          expect(box.x + box.width).toBeLessThanOrEqual(width);
+          await page.keyboard.press("Enter");
+        }
+      },
+    );
+  }
+});
+
+test.describe("phone focus and touch drag", () => {
+  test.use({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+  test("editable text is at least 16px and touch drop does not refocus the editor", async ({
+    page,
+    request,
+  }) => {
+    const editor = await seedEditor(page, request, [
+      paragraph("第一块"),
+      paragraph("第二块"),
+      paragraph("第三块"),
+      { type: "callout", content: [paragraph("提示内容")] },
+      { type: "blockquote", content: [paragraph("引用内容")] },
+      { type: "codeBlock", content: [{ type: "text", text: "code" }] },
+    ]);
+    for (const el of await editor
+      .locator("p, pre, code, .editor-callout")
+      .all())
+      expect(
+        await el.evaluate((node) =>
+          parseFloat(getComputedStyle(node).fontSize),
+        ),
+      ).toBeGreaterThanOrEqual(16);
+    expect(
+      await page.locator('meta[name="viewport"]').getAttribute("content"),
+    ).not.toMatch(/user-scalable=no|maximum-scale=1/);
+    await editor.locator(":scope > p").first().tap();
+    await expect(editor).toBeFocused();
+    const grip = page.getByRole("button", { name: "拖动内容块", exact: true });
+    await grip.tap();
+    await expect(
+      page.getByRole("menuitem", { name: "上移此块", exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await editor.locator(":scope > p").first().tap();
+    await expect(grip).toBeVisible();
+    const start = (await grip.boundingBox())!;
+    const target = (await editor.locator(":scope > p").nth(2).boundingBox())!;
+    const cdp = await page.context().newCDPSession(page);
+    const x = start.x + start.width / 2,
+      y = start.y + start.height / 2;
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x, y }],
+    });
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: y + 12 }],
+    });
+    await expect(page.locator(".block-drag-preview")).toBeVisible();
+    await expect(editor).not.toBeFocused();
+    await page.evaluate(() =>
+      window.visualViewport?.dispatchEvent(new Event("resize")),
+    );
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y: target.y + target.height - 2 }],
+    });
+    await expect(page.locator(".block-drag-preview")).toContainText("第一块");
+    const layers = await page.evaluate(() => ({
+      preview: Number(
+        getComputedStyle(document.querySelector(".block-drag-preview")!).zIndex,
+      ),
+      guide: Number(
+        getComputedStyle(document.querySelector(".drag-insertion-guide")!)
+          .zIndex,
+      ),
+    }));
+    expect(layers.preview).toBeGreaterThan(layers.guide);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await expect(editor.locator(":scope > p")).toHaveText([
+      "第二块",
+      "第三块",
+      "第一块",
+      "",
+    ]);
+    await expect(editor).not.toBeFocused();
+    await expect(page.locator(".block-drag-preview")).toHaveCount(0);
+    await saved(page);
+    await page.reload();
+    await expect(page.locator(".block-editor > p")).toHaveText([
+      "第二块",
+      "第三块",
+      "第一块",
+      "",
+    ]);
+  });
+});
+
+test.describe("task checkbox first-line alignment", () => {
+  for (const width of [390, 1440]) {
+    test(
+      "checkboxes align with text at " + width + "px",
+      async ({ page, request }) => {
+        await page.setViewportSize({ width, height: 844 });
+        const task = (text: string, checked: boolean, extra: any[] = []) => ({
+          type: "taskItem",
+          attrs: { checked },
+          content: [paragraph(text), ...extra],
+        });
+        const editor = await seedEditor(page, request, [
+          {
+            type: "taskList",
+            content: [
+              task("整理这一周的想法和笔记", true),
+              task("留 30 分钟，读几页正在看的书", false),
+              task(
+                "换行之后，复选框仍然应当与第一行文字对齐。".repeat(10),
+                false,
+              ),
+              task("父级待办", false, [
+                { type: "taskList", content: [task("嵌套待办", true)] },
+              ]),
+              task("首段待办", true, [paragraph("第二段不影响首行对齐")]),
+            ],
+          },
+        ]);
+        await expect(editor.locator("li[data-checked]")).toHaveCount(6);
+        const checkAlignment = async () => {
+          await expect(editor.locator("li[data-checked]")).toHaveCount(6);
+          const errors = await editor
+            .locator("li[data-checked]")
+            .evaluateAll((items) =>
+              items.map((item) => {
+                const checkbox = item
+                  .querySelector(":scope > label input")!
+                  .getBoundingClientRect();
+                const text = item.querySelector(":scope > div > p")!;
+                const style = getComputedStyle(text);
+                const center =
+                  text.getBoundingClientRect().top +
+                  parseFloat(style.borderTopWidth) +
+                  parseFloat(style.paddingTop) +
+                  parseFloat(style.lineHeight) / 2;
+                return Math.abs(checkbox.top + checkbox.height / 2 - center);
+              }),
+            );
+          expect(errors).toHaveLength(6);
+          for (const error of errors) expect(error).toBeLessThan(1);
+        };
+        await checkAlignment();
+        const second = editor
+          .locator("li[data-checked]")
+          .nth(1)
+          .locator(":scope > label input");
+        await second.check();
+        await expect(second).toBeChecked();
+        await checkAlignment();
+        await saved(page);
+        await page.screenshot({
+          path: "test-results/task-checkbox-alignment-" + width + ".png",
+          fullPage: true,
+        });
+        await page.reload();
+        await expect(
+          page
+            .locator(".block-editor li[data-checked]")
+            .nth(1)
+            .locator(":scope > label input"),
+        ).toBeChecked();
+        await checkAlignment();
+      },
+    );
+  }
+});
+
+test.describe("italic rendering and persistence", () => {
+  for (const width of [390, 1440]) {
+    test(
+      "Chinese italic is visibly slanted and persists at " + width + "px",
+      async ({ page, request }) => {
+        await page.setViewportSize({ width, height: 844 });
+        const text = "中文斜体应该清楚可见";
+        const editor = await seedEditor(page, request, [
+          paragraph(text),
+          paragraph("Keep plain English"),
+        ]);
+        await expect(editor.locator(":scope > p").first()).toHaveText(text);
+        const selectText = async () => {
+          await editor.evaluate((el: any) => {
+            el.editor.view.focus();
+            el.editor.commands.setTextSelection({
+              from: 1,
+              to: el.editor.state.doc.firstChild.nodeSize - 1,
+            });
+          });
+        };
+        await selectText();
+        const italic = page
+          .getByRole("toolbar", { name: "块格式工具栏", exact: true })
+          .getByRole("button", { name: "斜体", exact: true });
+        await italic.click();
+        await expect(italic).toHaveClass("active");
+        const emphasis = editor.locator("em");
+        await expect(emphasis).toHaveText(text);
+        await expect(emphasis).toHaveCSS("font-style", "italic");
+        await expect(emphasis).toHaveCSS("font-synthesis", "style");
+        await expect(
+          editor.locator(":scope > p").nth(1).locator("em"),
+        ).toHaveCount(0);
+        await saved(page);
+        const workspace = await snapshot(request);
+        const storedText = workspace.pages.find(
+          (p: any) => p.id === fixture.note.id,
+        ).content.content[0].content[0];
+        expect(storedText.marks).toContainEqual({ type: "italic" });
+        await page
+          .getByRole("textbox", { name: "页面标题", exact: true })
+          .focus();
+        const rendered = await emphasis.screenshot({
+          caret: "hide",
+          animations: "disabled",
+        });
+        await emphasis.evaluate(
+          (el) => ((el as HTMLElement).style.fontSynthesis = "none"),
+        );
+        const suppressed = await emphasis.screenshot({
+          caret: "hide",
+          animations: "disabled",
+        });
+        expect(rendered.equals(suppressed)).toBeFalsy();
+        await emphasis.evaluate((el) =>
+          (el as HTMLElement).style.removeProperty("font-synthesis"),
+        );
+        await page.screenshot({
+          path: "test-results/italic-visible-" + width + ".png",
+          fullPage: true,
+        });
+        await page.reload();
+        await expect(emphasis).toHaveText(text);
+        await expect(emphasis).toHaveCSS("font-synthesis", "style");
+        await selectText();
+        await italic.click();
+        await expect(emphasis).toHaveCount(0);
+        await expect(italic).not.toHaveClass("active");
+        await saved(page);
+      },
+    );
+  }
 });

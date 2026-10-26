@@ -1,0 +1,14 @@
+[Unit]
+Description=NotionX consistent SQLite backup
+
+[Service]
+Type=oneshot
+User=notionx
+Group=notionx
+ExecStart=/usr/bin/python3 /opt/notionx/current/deploy/backup.py
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/notionx

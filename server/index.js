@@ -104,6 +104,7 @@ if (process.env.NODE_ENV === "production") {
   app.use(vite.middlewares);
 }
 const port = Number(process.env.PORT || 5173);
-app.listen(port, "0.0.0.0", () =>
-  console.log(`拾页 ready: http://localhost:${port}`),
+const host = process.env.HOST || "0.0.0.0";
+app.listen(port, host, () =>
+  console.log(`拾页 ready: http://${host}:${port}`),
 );

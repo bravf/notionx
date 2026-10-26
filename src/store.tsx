@@ -16,6 +16,10 @@ interface Store {
   status: Status;
   error: string;
   mutate: (ops: Op[]) => void;
+  undo: (scope: string) => void;
+  redo: (scope: string) => void;
+  canUndo: (scope: string) => boolean;
+  canRedo: (scope: string) => boolean;
   put: (entity: Entity, item: any) => void;
   remove: (entity: Entity, id: string) => void;
   retry: () => void;
@@ -46,6 +50,35 @@ function apply(data: Workspace, ops: Op[]): Workspace {
   }
   return next;
 }
+type HistoryChange = {
+  entity: Entity;
+  id: string;
+  before: any;
+  after: any;
+  keys: string[];
+};
+type HistoryEntry = HistoryChange[];
+function historyScope(data: Workspace, ops: Op[]) {
+  const scopes = new Set<string>();
+  for (const op of ops) {
+    if (!["records", "fields", "views", "databases"].includes(op.entity))
+      return null;
+    const before = (data[op.entity] as any[]).find((item) => item.id === op.id);
+    const item = op.action === "set" ? op.data : before;
+    if (!item) continue;
+    if (
+      op.entity === "records" &&
+      before &&
+      op.action === "set" &&
+      JSON.stringify(before.values) === JSON.stringify(item.values) &&
+      before.order === item.order
+    )
+      continue;
+    scopes.add(op.entity === "databases" ? item.id : item.databaseId);
+  }
+  return scopes.size === 1 ? [...scopes][0] : null;
+}
+
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState(initial),
     [status, setStatus] = useState<Status>("loading"),
@@ -54,13 +87,29 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [auth, setAuth] = useState(false),
     [password, setPassword] = useState("");
   const [recovery, setRecovery] = useState<string | null>(null);
+  const histories = useRef(
+    new Map<string, { undo: HistoryEntry[]; redo: HistoryEntry[] }>(),
+  );
+  const replaying = useRef(false);
   const ref = useRef(initial),
     queue = useRef<Op[]>([]),
     busy = useRef(false),
     revision = useRef(0),
     timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
+    storageTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
     toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined),
     blocked = useRef(false);
+  const persistPending = useCallback(() => {
+    clearTimeout(storageTimer.current);
+    storageTimer.current = undefined;
+    if (!queue.current.length && !busy.current) return;
+    try {
+      localStorage.setItem(
+        "notionx-pending",
+        JSON.stringify({ ...ref.current, schemaVersion: 1 }),
+      );
+    } catch {}
+  }, []);
   const toast = useCallback((text: string) => {
     setNotice(text);
     clearTimeout(toastTimer.current);
@@ -78,10 +127,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       ref.current = state;
       revision.current = state.revision;
       queue.current = [];
+      histories.current.clear();
       blocked.current = false;
       setData(state);
       setStatus("saved");
       setError("");
+      clearTimeout(storageTimer.current);
+      storageTimer.current = undefined;
       localStorage.removeItem("notionx-pending");
     } catch (e) {
       setError((e as Error).message);
@@ -113,31 +165,115 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       setData(ref.current);
       setError("");
       setStatus(queue.current.length ? "saving" : "saved");
-      if (!queue.current.length) localStorage.removeItem("notionx-pending");
+      if (!queue.current.length) {
+        clearTimeout(storageTimer.current);
+        storageTimer.current = undefined;
+        localStorage.removeItem("notionx-pending");
+      }
     } catch (e) {
       queue.current = [...ops, ...queue.current];
+      persistPending();
       setError((e as Error).message);
       if (!blocked.current) setStatus("error");
     } finally {
       busy.current = false;
     }
-  }, []);
+  }, [persistPending]);
   const mutate = useCallback(
     (ops: Op[]) => {
+      if (!ops.length) return;
+      if (!replaying.current) {
+        const scope = historyScope(ref.current, ops);
+        if (scope) {
+          const entry: HistoryEntry = [];
+          let current = ref.current;
+          for (const op of ops) {
+            const before = (current[op.entity] as any[]).find(
+              (item) => item.id === op.id,
+            );
+            const after = op.action === "set" ? op.data : undefined;
+            const keys = [
+              ...new Set([
+                ...Object.keys(before || {}),
+                ...Object.keys(after || {}),
+              ]),
+            ].filter(
+              (key) =>
+                JSON.stringify(before?.[key]) !== JSON.stringify(after?.[key]),
+            );
+            if (keys.length)
+              entry.push({ entity: op.entity, id: op.id, before, after, keys });
+            current = apply(current, [op]);
+          }
+          if (entry.length) {
+            const history = histories.current.get(scope) || {
+              undo: [],
+              redo: [],
+            };
+            history.undo.push(entry);
+            if (history.undo.length > 80) history.undo.shift();
+            history.redo = [];
+            histories.current.set(scope, history);
+          }
+        }
+      }
+      const hadPending = queue.current.length > 0 || busy.current;
       ref.current = apply(ref.current, ops);
       setData(ref.current);
       queue.current.push(...ops);
       setStatus(blocked.current ? "conflict" : "saving");
-      try {
-        localStorage.setItem(
-          "notionx-pending",
-          JSON.stringify({ ...ref.current, schemaVersion: 1 }),
-        );
-      } catch {}
+      // Save the first dirty state immediately; throttle subsequent snapshots
+      // with a bounded wait even while typing continuously.
+      if (!hadPending) persistPending();
+      else if (storageTimer.current === undefined)
+        storageTimer.current = setTimeout(persistPending, 700);
       clearTimeout(timer.current);
       timer.current = setTimeout(() => void drain(), 450);
     },
-    [drain],
+    [drain, persistPending],
+  );
+  const replayHistory = useCallback(
+    (scope: string, direction: "undo" | "redo") => {
+      if (blocked.current) {
+        toast("请先解决同步冲突再撤销");
+        return;
+      }
+      const history = histories.current.get(scope);
+      const entry = history?.[direction].pop();
+      if (!history || !entry) return;
+      const changes = direction === "undo" ? [...entry].reverse() : entry;
+      const ops: Op[] = [];
+      for (const change of changes) {
+        const target = direction === "undo" ? change.before : change.after;
+        const current = (ref.current[change.entity] as any[]).find(
+          (item) => item.id === change.id,
+        );
+        if (!target)
+          ops.push({ entity: change.entity, id: change.id, action: "delete" });
+        else {
+          const value = { ...(current || target) };
+          for (const key of change.keys) {
+            if (Object.hasOwn(target, key)) value[key] = target[key];
+            else delete value[key];
+          }
+          ops.push({
+            entity: change.entity,
+            id: change.id,
+            action: "set",
+            data: value,
+          });
+        }
+      }
+      history[direction === "undo" ? "redo" : "undo"].push(entry);
+      replaying.current = true;
+      try {
+        mutate(ops);
+      } finally {
+        replaying.current = false;
+      }
+      toast(direction === "undo" ? "已撤销数据表格操作" : "已重做数据表格操作");
+    },
+    [mutate, toast],
   );
   useEffect(() => {
     if (status === "saving" && !busy.current && queue.current.length) {
@@ -163,6 +299,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           !queue.current.length &&
           d.revision !== revision.current
         ) {
+          histories.current.clear();
           ref.current = d;
           revision.current = d.revision;
           setData(d);
@@ -171,16 +308,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 15000);
     const unload = (e: BeforeUnloadEvent) => {
       if (queue.current.length || busy.current) {
+        persistPending();
         e.preventDefault();
         e.returnValue = "";
       }
     };
+    const hide = () => {
+      if (document.visibilityState === "hidden") persistPending();
+    };
     window.addEventListener("beforeunload", unload);
+    window.addEventListener("pagehide", persistPending);
+    document.addEventListener("visibilitychange", hide);
     return () => {
       clearInterval(interval);
       window.removeEventListener("beforeunload", unload);
+      window.removeEventListener("pagehide", persistPending);
+      document.removeEventListener("visibilitychange", hide);
+      clearTimeout(storageTimer.current);
+      storageTimer.current = undefined;
     };
-  }, [reload, toast]);
+  }, [reload, toast, persistPending]);
   return (
     <Context.Provider
       value={{
@@ -188,6 +335,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         status,
         error,
         mutate,
+        undo: (scope) => replayHistory(scope, "undo"),
+        redo: (scope) => replayHistory(scope, "redo"),
+        canUndo: (scope) => !!histories.current.get(scope)?.undo.length,
+        canRedo: (scope) => !!histories.current.get(scope)?.redo.length,
         put: (entity, item) =>
           mutate([{ entity, id: item.id, action: "set", data: item }]),
         remove: (entity, id) => mutate([{ entity, id, action: "delete" }]),

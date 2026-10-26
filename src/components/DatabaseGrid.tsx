@@ -1,7 +1,14 @@
 import { sortableDrag } from "../lib/sortableDrag";
 import { OptionPicker } from "./OptionPicker";
 import { Select } from "./Select";
-import { useMemo, useState, useEffect, useRef } from "react";
+import {
+  DateRangeCalendar,
+  SingleDateCalendar,
+  readDateValue,
+  type DateDraft,
+} from "./DatePicker";
+import * as Popover from "@radix-ui/react-popover";
+import { useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
 import {
   useReactTable,
   getCoreRowModel,
@@ -15,6 +22,8 @@ import {
   Search,
   SlidersHorizontal,
   ArrowDownUp,
+  ArrowDown,
+  ArrowUp,
   ChevronDown,
   MoreHorizontal,
   Trash2,
@@ -34,6 +43,18 @@ import {
   ArrowRight,
   Database as DatabaseIcon,
   CheckSquare,
+  Undo2,
+  Redo2,
+  Type,
+  Heading,
+  Hash,
+  CircleDot,
+  Tags,
+  CircleDashed,
+  Link,
+  SquareFunction,
+  CalendarClock,
+  History,
 } from "lucide-react";
 import type { Field, FieldType, Entry, View, Filter, Op } from "../types";
 import { uid, emptyDoc, fieldTypes, symbol, download } from "../types";
@@ -64,6 +85,24 @@ function renderTemplate(template: any, context: any) {
 const numeric = (f: Field) => f.type === "number" || f.type === "formula";
 const readonly = (f: Field) =>
   ["formula", "created", "updated"].includes(f.type);
+const headerIcons = {
+  title: Heading,
+  text: Type,
+  number: Hash,
+  select: CircleDot,
+  multiSelect: Tags,
+  status: CircleDashed,
+  date: CalendarDays,
+  checkbox: CheckSquare,
+  url: Link,
+  formula: SquareFunction,
+  created: CalendarClock,
+  updated: History,
+};
+function FieldSymbol({ type }: { type: FieldType }) {
+  const Icon = headerIcons[type] || Type;
+  return <Icon size={15} strokeWidth={1.8} aria-hidden="true" />;
+}
 function safeValue(field: Field, row: Entry, fields: Field[]): any {
   try {
     return fieldValue(field, row, fields);
@@ -142,11 +181,101 @@ function Value({ value, field }: { value: any; field: Field }) {
   );
 }
 
+function DateCellEditor({
+  value,
+  onChange,
+  children,
+}: {
+  value: any;
+  onChange: (value: any) => void;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false),
+    [draft, setDraft] = useState<DateDraft>({
+      start: "",
+      end: "",
+      time: false,
+    }),
+    [error, setError] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    setDraft(readDateValue(value));
+    setError("");
+  }, [open, value]);
+  function finish() {
+    if (!draft.start) {
+      onChange(null);
+      setOpen(false);
+      return;
+    }
+    try {
+      const value = convertValue(
+        draft.end ? { start: draft.start, end: draft.end } : draft.start,
+        "date",
+      );
+      onChange(value);
+      setOpen(false);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>{children}</Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          className="date-popover range-popover"
+          aria-label="选择日期"
+          align="start"
+          sideOffset={5}
+          collisionPadding={12}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+        >
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              finish();
+            }}
+          >
+            <DateRangeCalendar
+              {...draft}
+              onChange={(next) => {
+                setDraft(next);
+                setError("");
+              }}
+            />
+            {error && <p className="date-error">{error}</p>}
+            <div className="option-footer date-footer">
+              <button
+                type="button"
+                onClick={() => {
+                  onChange(null);
+                  setOpen(false);
+                }}
+              >
+                清空
+              </button>
+              <span>
+                <button type="button" onClick={() => setOpen(false)}>
+                  取消
+                </button>
+                <button type="submit">完成</button>
+              </span>
+            </div>
+          </form>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
 function Cell({
   field,
   row,
   fields,
   onChange,
+  mobile,
+  selectMode,
   onMobile,
   onOpen,
 }: {
@@ -154,6 +283,8 @@ function Cell({
   row: Entry;
   fields: Field[];
   onChange: (value: any) => void;
+  mobile: boolean;
+  selectMode?: boolean;
   onMobile: () => void;
   onOpen: () => void;
 }) {
@@ -168,14 +299,30 @@ function Cell({
     [draft, setDraft] = useState(""),
     input = useRef<HTMLInputElement>(null);
   const editingRef = useRef(false);
+  const selectAll = useRef(true);
+  const pendingFocus = useRef<(() => void) | null>(null);
+  useLayoutEffect(() => {
+    if (editing) {
+      if (selectAll.current) input.current?.select();
+      else {
+        const end = input.current?.value.length || 0;
+        input.current?.setSelectionRange(end, end);
+      }
+      return;
+    }
+    if (!pendingFocus.current) return;
+    const focus = pendingFocus.current;
+    pendingFocus.current = null;
+    focus();
+  }, [editing]);
   const [inputError, setInputError] = useState("");
-  const { toast } = useStore();
-  const start = () => {
-    setDraft(value == null ? "" : String(value));
+  const { toast, put } = useStore();
+  const start = (seed?: string) => {
+    selectAll.current = seed === undefined;
+    setDraft(seed ?? (value == null ? "" : String(value)));
     setInputError("");
     editingRef.current = true;
     setEditing(true);
-    setTimeout(() => input.current?.select(), 0);
   };
   const commit = () => {
     if (!editingRef.current) return true;
@@ -191,10 +338,9 @@ function Cell({
       return false;
     }
   };
-  const mobile = () => window.matchMedia("(max-width: 760px)").matches;
   const intercept = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest(".open-record")) return;
-    if (mobile() && !readonly(field)) {
+    if (mobile && !readonly(field)) {
       e.preventDefault();
       e.stopPropagation();
       onMobile();
@@ -236,21 +382,33 @@ function Cell({
           value={value}
           multiple={field.type === "multiSelect"}
           onChange={onChange}
+          onCreateOption={(name) => {
+            if (
+              field.options.some(
+                (option) => option.toLowerCase() === name.toLowerCase(),
+              )
+            )
+              return;
+            put("fields", { ...field, options: [...field.options, name] });
+          }}
         >
           <button className="cell-value" aria-label={field.name}>
             <Value value={value} field={field} />
-            {(!value || (Array.isArray(value) && !value.length)) && (
-              <span className="cell-placeholder">选择…</span>
-            )}
           </button>
         </OptionPicker>
       </div>
     );
   if (field.type === "date")
-    return (
+    return mobile ? (
       <button className="cell-value" aria-label={field.name} onClick={onMobile}>
         <Value value={value} field={field} />
       </button>
+    ) : (
+      <DateCellEditor value={value} onChange={onChange}>
+        <button className="cell-value" aria-label={field.name}>
+          <Value value={value} field={field} />
+        </button>
+      </DateCellEditor>
     );
   return (
     <div
@@ -281,6 +439,34 @@ function Cell({
             if (e.key === "Enter" || e.key === "Tab") {
               e.preventDefault();
               const td = e.currentTarget.closest("td");
+              if (!td) {
+                const panel = e.currentTarget.closest(".record-properties");
+                const property = e.currentTarget.closest(
+                  ".record-properties > div",
+                );
+                const controls = Array.from(panel?.children || []).flatMap(
+                  (item) => {
+                    const button = item.querySelector<HTMLElement>(
+                      "button.cell-value, input[aria-label]",
+                    );
+                    return button ? [{ item, button }] : [];
+                  },
+                );
+                const index = controls.findIndex(
+                  (item) => item.item === property,
+                );
+                const target = controls[index + (e.shiftKey ? -1 : 1)]?.button;
+                const fallback =
+                  panel?.parentElement?.querySelector<HTMLElement>(
+                    ".block-editor",
+                  );
+                pendingFocus.current = () => {
+                  (target || fallback)?.focus();
+                  if (target?.closest(".cell-text")) target.click();
+                };
+                if (!commit()) pendingFocus.current = null;
+                return;
+              }
               const tr = td?.parentElement;
               const table = tr?.closest("table");
               const rows = table
@@ -301,50 +487,73 @@ function Cell({
                 ),
               );
               const current = flatCells.indexOf(td!);
-              const target =
-                e.key === "Enter"
-                  ? rows[ri + step]?.querySelectorAll("td[data-field-id]")[ci]
-                  : flatCells[current + step];
-              if (!commit()) return;
-              setTimeout(() => {
+              let target: Element | undefined;
+              if (e.key === "Enter") {
+                // Move down the same column, skipping computed and readonly cells.
+                for (let r = ri + step; r >= 0 && r < rows.length; r += step) {
+                  const candidate =
+                    rows[r].querySelectorAll("td[data-field-id]")[ci];
+                  if (candidate && editable(candidate)) {
+                    target = candidate;
+                    break;
+                  }
+                }
+              } else target = flatCells[current + step];
+              pendingFocus.current = () => {
                 const button =
                   target?.querySelector<HTMLButtonElement>("button.cell-value");
-                button?.focus();
+                (button || td)?.focus();
                 if (button?.closest(".cell-text")) button.click();
-              }, 0);
+              };
+              if (!commit()) pendingFocus.current = null;
             }
             if (e.key === "Escape") {
               e.preventDefault();
               editingRef.current = false;
               setInputError("");
               const parent = e.currentTarget.closest(".cell-text");
+              pendingFocus.current = () =>
+                parent
+                  ?.querySelector<HTMLButtonElement>(".cell-value")
+                  ?.focus();
               setEditing(false);
-              setTimeout(
-                () =>
-                  parent
-                    ?.querySelector<HTMLButtonElement>(".cell-value")
-                    ?.focus(),
-                0,
-              );
             }
           }}
         />
       ) : (
         <button
           className="cell-value"
-          onClick={start}
+          onClick={(event) => {
+            if (!selectMode || event.detail === 0) start();
+          }}
+          onDoubleClick={selectMode ? () => start() : undefined}
+          onKeyDown={
+            selectMode
+              ? (event) => {
+                  if (event.nativeEvent.isComposing) return;
+                  if (event.key === "F2") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    start();
+                    return;
+                  }
+                  if (
+                    event.key.length === 1 &&
+                    !event.metaKey &&
+                    !event.ctrlKey &&
+                    !event.altKey
+                  ) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    start(event.key);
+                  }
+                }
+              : undefined
+          }
           aria-label={field.name}
           title={formatValue(value, field)}
         >
-          {field.type === "title" && (
-            <span className="record-page-icon">▤</span>
-          )}
           <Value value={value} field={field} />
-          {(value == null || value === "") && (
-            <span className="cell-placeholder">
-              {field.type === "title" ? "未命名" : "填写…"}
-            </span>
-          )}
         </button>
       )}
       {inputError && (
@@ -763,11 +972,16 @@ function FieldEditor({
 export function DatabaseGrid({
   databaseId,
   embedded = false,
+  openRecordId,
+  onOpenRecordHandled,
 }: {
   databaseId: string;
   embedded?: boolean;
+  openRecordId?: string | null;
+  onOpenRecordHandled?: () => void;
 }) {
-  const { data, mutate, put, remove, toast } = useStore();
+  const { data, mutate, put, remove, toast, undo, redo, canUndo, canRedo } =
+    useStore();
   const db = data.databases.find((d) => d.id === databaseId);
   const fields = useMemo(
     () =>
@@ -805,6 +1019,7 @@ export function DatabaseGrid({
     [cellDraft, setCellDraft] = useState<any>(""),
     [cellEnd, setCellEnd] = useState(""),
     [cellTime, setCellTime] = useState(false),
+    [newOption, setNewOption] = useState(""),
     [viewName, setViewName] = useState(""),
     [csv, setCsv] = useState<string[][]>([]),
     [mapping, setMapping] = useState<Record<number, string>>({}),
@@ -813,13 +1028,69 @@ export function DatabaseGrid({
       row: string;
       field: string;
     } | null>(null);
+  type CellPoint = { row: string; field: string };
+  type CellRange = {
+    anchor: CellPoint;
+    head: CellPoint;
+  };
+  type CellRect = { top: number; bottom: number; left: number; right: number };
+  const [cellRange, setCellRangeState] = useState<CellRange | null>(null);
+  const rangeRef = useRef(cellRange);
+  const [fillActive, setFillActive] = useState(false);
+  const fillDrag = useRef<{ source: CellRect; targetRow: number } | null>(null);
+  const fillStop = useRef<() => void>(() => {});
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    new Set(),
+  );
+  const setCellRange = (range: CellRange | null) => {
+    rangeRef.current = range;
+    setCellRangeState(range);
+  };
+  const cellPointer = useRef<{ anchor: CellPoint; moved: boolean } | null>(
+    null,
+  );
   const grid = useRef<HTMLDivElement>(null);
+  const recordTitleRef = useRef<HTMLTextAreaElement>(null);
   const [localWidths, setLocalWidths] = useState<Record<string, number>>({});
   const widthsRef = useRef<Record<string, number>>({});
   const file = useRef<HTMLInputElement>(null),
     dragging = useRef<{ kind: "row" | "column"; id: string } | null>(null);
   const dragCleanup = useRef<() => void>(() => {});
-  useEffect(() => () => dragCleanup.current(), [databaseId]);
+  useEffect(
+    () => () => {
+      dragCleanup.current();
+      fillStop.current();
+    },
+    [databaseId],
+  );
+  useEffect(() => {
+    if (!cellRange) return;
+    function clearSelection(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (
+        !target ||
+        target.closest(
+          "[data-radix-popper-content-wrapper], .date-popover, .option-picker, [role='menu'], [role='listbox']",
+        )
+      )
+        return;
+      const table = grid.current;
+      if (!table) return;
+      const cell = target.closest<HTMLElement>("td[data-field-id]");
+      if (
+        cell &&
+        table.contains(cell) &&
+        cell.dataset.fieldId !== "_select"
+      )
+        return;
+      if (table.contains(document.activeElement))
+        (document.activeElement as HTMLElement).blur();
+      cellPointer.current = null;
+      setCellRange(null);
+    }
+    document.addEventListener("pointerdown", clearSelection, true);
+    return () => document.removeEventListener("pointerdown", clearSelection, true);
+  }, [cellRange]);
   function beginSort(
     event: React.PointerEvent,
     kind: "row" | "column",
@@ -888,7 +1159,22 @@ export function DatabaseGrid({
     setSelection({});
     setRecordId(null);
     setLocalWidths({});
+    setCellRange(null);
+    setCollapsedGroups(new Set());
   }, [databaseId]);
+  useEffect(() => {
+    const element = recordTitleRef.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = element.scrollHeight + "px";
+    if (!element.value) setTimeout(() => element.focus(), 0);
+  }, [detail?.id]);
+  useEffect(() => {
+    if (!openRecordId) return;
+    if (records.some((record) => record.id === openRecordId))
+      setRecordId(openRecordId);
+    onOpenRecordHandled?.();
+  }, [openRecordId, records, onOpenRecordHandled]);
   const patchView = (patch: Partial<View>) =>
     view && put("views", { ...view, ...patch });
   function updateValue(row: Entry, field: Field, value: any) {
@@ -901,6 +1187,7 @@ export function DatabaseGrid({
   }
   function showCell(row: Entry, field: Field) {
     setMobileCell({ recordId: row.id, fieldId: field.id });
+    setNewOption("");
     const v = safeValue(field, row, fields);
     setCellTime(
       field.type === "date" &&
@@ -917,6 +1204,28 @@ export function DatabaseGrid({
       field.type === "date" && v && typeof v === "object" ? v.end || "" : "",
     );
   }
+  function addMobileOption() {
+    if (!cellField) return;
+    const name = newOption.trim();
+    if (!name) return;
+    const existing =
+      cellField.options.find(
+        (option) => option.toLowerCase() === name.toLowerCase(),
+      ) || name;
+    if (!cellField.options.includes(existing))
+      put("fields", {
+        ...cellField,
+        options: [...cellField.options, existing],
+      });
+    if (cellField.type === "multiSelect")
+      setCellDraft((previous: any) =>
+        Array.isArray(previous) && previous.includes(existing)
+          ? previous
+          : [...(previous || []), existing],
+      );
+    else setCellDraft(existing);
+    setNewOption("");
+  }
   function saveCell(next = 0) {
     if (!cellRow || !cellField) return;
     try {
@@ -924,7 +1233,7 @@ export function DatabaseGrid({
       if (cellField.type === "date" && cellEnd) {
         if (!cellDraft || cellEnd < cellDraft)
           throw new Error("结束日期不能早于开始日期");
-        value = { start: cellDraft, end: cellEnd };
+        value = convertValue({ start: cellDraft, end: cellEnd }, "date");
       }
       updateValue(cellRow, cellField, value);
       if (next) {
@@ -1199,152 +1508,187 @@ export function DatabaseGrid({
               { numeric: true },
             );
           },
-          header: () => (
-            <div className="column-heading">
-              {field.type !== "title" && (
-                <span
-                  className="column-drag-grip"
-                  title={`拖动${field.name}列排序`}
-                  onPointerDown={(e) => beginSort(e, "column", field.id)}
-                >
-                  <GripVertical size={13} />
-                </span>
-              )}
-              <Menu
-                align="start"
-                trigger={
-                  <button>
-                    <span className="field-symbol">{symbol(field.type)}</span>
-                    <span>{field.name}</span>
-                    <ChevronDown size={12} />
-                  </button>
-                }
-              >
-                <MenuLabel>
-                  {symbol(field.type)} {field.name}
-                </MenuLabel>
-                <MenuItem onClick={() => setFieldEdit(field)}>
-                  <Settings2 size={14} />
-                  编辑属性
-                </MenuItem>
-                <MenuDivider />
-                <MenuItem
-                  onClick={() =>
-                    patchView({
-                      sorts: [
-                        { id: field.id, desc: false },
-                        ...(view?.sorts || []).filter((s) => s.id !== field.id),
-                      ],
-                    })
+          header: () => {
+            const sortIndex =
+              view?.sorts.findIndex((sort) => sort.id === field.id) ?? -1;
+            const sort = sortIndex >= 0 ? view?.sorts[sortIndex] : undefined;
+            return (
+              <div className="column-heading">
+                {field.type !== "title" && (
+                  <span
+                    className="column-drag-grip"
+                    title={`拖动${field.name}列排序`}
+                    onPointerDown={(e) => beginSort(e, "column", field.id)}
+                  >
+                    <GripVertical size={13} />
+                  </span>
+                )}
+                <Menu
+                  align="start"
+                  trigger={
+                    <button>
+                      <span className="field-symbol">
+                        <FieldSymbol type={field.type} />
+                      </span>
+                      <span>{field.name}</span>
+                      {sort && (
+                        <span
+                          className="column-sort-indicator"
+                          title={`排序 ${sortIndex + 1} · ${sort.desc ? "降序" : "升序"}`}
+                        >
+                          {sort.desc ? (
+                            <ArrowDown size={11} />
+                          ) : (
+                            <ArrowUp size={11} />
+                          )}
+                          {(view?.sorts.length || 0) > 1 && (
+                            <em>{sortIndex + 1}</em>
+                          )}
+                        </span>
+                      )}
+                      <ChevronDown size={12} />
+                    </button>
                   }
                 >
-                  <ArrowDownUp size={14} />
-                  升序排列
-                </MenuItem>
-                <MenuItem
-                  onClick={() =>
-                    patchView({
-                      sorts: [
-                        { id: field.id, desc: true },
-                        ...(view?.sorts || []).filter((s) => s.id !== field.id),
-                      ],
-                    })
-                  }
-                >
-                  <ArrowDownUp size={14} />
-                  降序排列
-                </MenuItem>
-                <MenuItem
-                  onClick={() => {
-                    patchView({
-                      filters: [
-                        ...(view?.filters || []),
-                        {
-                          fieldId: field.id,
-                          op: ["title", "text", "url", "multiSelect"].includes(
-                            field.type,
-                          )
-                            ? "contains"
-                            : "eq",
-                          value: "",
-                        },
-                      ],
-                    });
-                    setPanel("filter");
-                  }}
-                >
-                  <FilterIcon size={14} />
-                  筛选此属性
-                </MenuItem>
-                {field.type !== "title" && (
-                  <>
-                    <MenuDivider />
-                    <MenuItem
-                      disabled={fields.findIndex((f) => f.id === field.id) <= 1}
-                      onClick={() => {
-                        dragging.current = { kind: "column", id: field.id };
-                        reorder(
-                          "column",
-                          fields[fields.findIndex((f) => f.id === field.id) - 1]
-                            .id,
-                        );
-                      }}
-                    >
-                      向左移动列
-                    </MenuItem>
-                    <MenuItem
-                      disabled={
-                        fields.findIndex((f) => f.id === field.id) ===
-                        fields.length - 1
-                      }
-                      onClick={() => {
-                        dragging.current = { kind: "column", id: field.id };
-                        reorder(
-                          "column",
-                          fields[fields.findIndex((f) => f.id === field.id) + 1]
-                            .id,
-                          true,
-                        );
-                      }}
-                    >
-                      向右移动列
-                    </MenuItem>
-                  </>
-                )}
-                {field.type !== "title" && (
-                  <>
-                    <MenuDivider />
-                    <MenuItem
-                      onClick={() =>
-                        patchView({
-                          hidden: [...(view?.hidden || []), field.id],
-                        })
-                      }
-                    >
-                      隐藏此属性
-                    </MenuItem>
-                    <MenuItem danger onClick={() => setDeleteField(field)}>
-                      <Trash2 size={14} />
-                      删除属性
-                    </MenuItem>
-                  </>
-                )}
-              </Menu>
-            </div>
-          ),
+                  <MenuLabel>
+                    {symbol(field.type)} {field.name}
+                  </MenuLabel>
+                  <MenuItem onClick={() => setFieldEdit(field)}>
+                    <Settings2 size={14} />
+                    编辑属性
+                  </MenuItem>
+                  <MenuDivider />
+                  <MenuItem
+                    onClick={() =>
+                      patchView({
+                        sorts: [
+                          { id: field.id, desc: false },
+                          ...(view?.sorts || []).filter(
+                            (s) => s.id !== field.id,
+                          ),
+                        ],
+                      })
+                    }
+                  >
+                    <ArrowDownUp size={14} />
+                    升序排列
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() =>
+                      patchView({
+                        sorts: [
+                          { id: field.id, desc: true },
+                          ...(view?.sorts || []).filter(
+                            (s) => s.id !== field.id,
+                          ),
+                        ],
+                      })
+                    }
+                  >
+                    <ArrowDownUp size={14} />
+                    降序排列
+                  </MenuItem>
+                  <MenuItem
+                    onClick={() => {
+                      patchView({
+                        filters: [
+                          ...(view?.filters || []),
+                          {
+                            fieldId: field.id,
+                            op: [
+                              "title",
+                              "text",
+                              "url",
+                              "multiSelect",
+                            ].includes(field.type)
+                              ? "contains"
+                              : "eq",
+                            value: "",
+                          },
+                        ],
+                      });
+                      setPanel("filter");
+                    }}
+                  >
+                    <FilterIcon size={14} />
+                    筛选此属性
+                  </MenuItem>
+                  {field.type !== "title" && (
+                    <>
+                      <MenuDivider />
+                      <MenuItem
+                        disabled={
+                          fields.findIndex((f) => f.id === field.id) <= 1
+                        }
+                        onClick={() => {
+                          dragging.current = { kind: "column", id: field.id };
+                          reorder(
+                            "column",
+                            fields[
+                              fields.findIndex((f) => f.id === field.id) - 1
+                            ].id,
+                          );
+                        }}
+                      >
+                        向左移动列
+                      </MenuItem>
+                      <MenuItem
+                        disabled={
+                          fields.findIndex((f) => f.id === field.id) ===
+                          fields.length - 1
+                        }
+                        onClick={() => {
+                          dragging.current = { kind: "column", id: field.id };
+                          reorder(
+                            "column",
+                            fields[
+                              fields.findIndex((f) => f.id === field.id) + 1
+                            ].id,
+                            true,
+                          );
+                        }}
+                      >
+                        向右移动列
+                      </MenuItem>
+                    </>
+                  )}
+                  {field.type !== "title" && (
+                    <>
+                      <MenuDivider />
+                      <MenuItem
+                        onClick={() =>
+                          patchView({
+                            hidden: [...(view?.hidden || []), field.id],
+                          })
+                        }
+                      >
+                        隐藏此属性
+                      </MenuItem>
+                      <MenuItem danger onClick={() => setDeleteField(field)}>
+                        <Trash2 size={14} />
+                        删除属性
+                      </MenuItem>
+                    </>
+                  )}
+                </Menu>
+              </div>
+            );
+          },
           cell: ({ row }: any) => (
             <Cell
               field={field}
               row={row.original}
               fields={fields}
               onChange={(value) => updateValue(row.original, field, value)}
+              mobile={isMobile}
+              selectMode={!isMobile}
               onMobile={() => showCell(row.original, field)}
               onOpen={() => setRecordId(row.original.id)}
             />
           ),
         })),
     ],
-    [fields, view, filtered, selection],
+    [fields, view, filtered, selection, isMobile],
   );
   const columnSizing = {
     ...Object.fromEntries(
@@ -1406,6 +1750,9 @@ export function DatabaseGrid({
     }
     return [...map.entries()].map(([key, rows]) => ({ key, rows }));
   }, [sorted, view?.groupBy, fields]);
+  const gridRows = groups.flatMap((group) =>
+    view?.groupBy && collapsedGroups.has(group.key) ? [] : group.rows,
+  );
   const selectedIds = Object.keys(selection).filter(
     (id) => selection[id] && records.some((r) => r.id === id),
   );
@@ -1445,7 +1792,7 @@ export function DatabaseGrid({
       ),
     ];
     download(
-      (db?.name || "数据库") + ".csv",
+      (db?.name || "数据表格") + ".csv",
       toCSV(rows),
       "text/csv;charset=utf-8",
     );
@@ -1652,14 +1999,395 @@ export function DatabaseGrid({
       </tr>
     );
   }
-  if (!db) return <div className="empty-state">数据库不存在</div>;
+  const visibleFields = fields.filter(
+    (field) => !view?.hidden.includes(field.id),
+  );
+  const cellRect = (range = cellRange) => {
+    if (!range) return null;
+    const r1 = gridRows.findIndex((row) => row.id === range.anchor.row),
+      r2 = gridRows.findIndex((row) => row.id === range.head.row);
+    const c1 = visibleFields.findIndex(
+        (field) => field.id === range.anchor.field,
+      ),
+      c2 = visibleFields.findIndex((field) => field.id === range.head.field);
+    if ([r1, r2, c1, c2].some((index) => index < 0)) return null;
+    return {
+      top: Math.min(r1, r2),
+      bottom: Math.max(r1, r2),
+      left: Math.min(c1, c2),
+      right: Math.max(c1, c2),
+    };
+  };
+  const selectedRect = cellRect();
+  const selectionClass = (row: string, field: string) => {
+    if (!selectedRect) return "";
+    const ri = gridRows.findIndex((item) => item.id === row),
+      ci = visibleFields.findIndex((item) => item.id === field);
+    if (
+      ri < selectedRect.top ||
+      ri > selectedRect.bottom ||
+      ci < selectedRect.left ||
+      ci > selectedRect.right
+    )
+      return "";
+    return (
+      "grid-cell-selected" +
+      (ri === selectedRect.top ? " range-top" : "") +
+      (ri === selectedRect.bottom ? " range-bottom" : "") +
+      (ci === selectedRect.left ? " range-left" : "") +
+      (ci === selectedRect.right ? " range-right" : "")
+    );
+  };
+  const focusCell = (point: CellPoint) => {
+    const row = Array.from(
+      grid.current?.querySelectorAll<HTMLElement>("tr[data-row-id]") || [],
+    ).find((el) => el.dataset.rowId === point.row);
+    const cell = Array.from(
+      row?.querySelectorAll<HTMLElement>("td[data-field-id]") || [],
+    ).find((el) => el.dataset.fieldId === point.field);
+    const button = cell?.querySelector<HTMLButtonElement>("button.cell-value");
+    (button || cell)?.focus();
+    cell?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+  const rangeForRect = (rect: CellRect): CellRange => ({
+    anchor: {
+      row: gridRows[rect.top].id,
+      field: visibleFields[rect.left].id,
+    },
+    head: {
+      row: gridRows[rect.bottom].id,
+      field: visibleFields[rect.right].id,
+    },
+  });
+  const fillColumns = selectedRect
+    ? visibleFields
+        .slice(selectedRect.left, selectedRect.right + 1)
+        .filter((field) => !readonly(field))
+    : [];
+  const canFill =
+    !!selectedRect && !isMobile && !view?.groupBy && fillColumns.length > 0;
+  const fillHandle =
+    canFill && selectedRect
+      ? {
+          row: gridRows[selectedRect.bottom]?.id,
+          field: visibleFields[selectedRect.right]?.id,
+          source: selectedRect,
+        }
+      : null;
+  function fillCells(source: CellRect, targetRow: number) {
+    const height = source.bottom - source.top + 1,
+      targetFields = visibleFields
+        .slice(source.left, source.right + 1)
+        .filter((field) => !readonly(field));
+    if (!targetFields.length) return;
+    const ops: Op[] = [];
+    let count = 0;
+    for (let r = source.bottom + 1; r <= targetRow; r++) {
+      const record = gridRows[r]?.original;
+      if (!record) continue;
+      const values = { ...record.values };
+      let changed = false;
+      for (const field of targetFields) {
+        const sourceRecord =
+          gridRows[source.top + ((r - source.bottom - 1) % height)]?.original;
+        if (!sourceRecord) continue;
+        let next = sourceRecord.values[field.id];
+        if (next === undefined)
+          next =
+            field.type === "checkbox"
+              ? false
+              : field.type === "multiSelect"
+                ? []
+                : null;
+        else if (typeof next === "object" && next) next = structuredClone(next);
+        if (JSON.stringify(values[field.id]) !== JSON.stringify(next)) {
+          values[field.id] = next;
+          changed = true;
+          count++;
+        }
+      }
+      if (changed)
+        ops.push({
+          entity: "records",
+          id: record.id,
+          action: "set",
+          data: {
+            ...record,
+            values,
+            updatedAt: new Date().toISOString(),
+          },
+        });
+    }
+    if (!ops.length) return;
+    mutate(ops);
+    toast(`已填充 ${count} 个单元格`);
+  }
+  function beginFill(event: React.PointerEvent, source: CellRect) {
+    if (!canFill || !grid.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    fillStop.current();
+    cellPointer.current = null;
+    fillDrag.current = { source: { ...source }, targetRow: source.bottom };
+    setFillActive(true);
+    document.body.classList.add("fill-dragging");
+    const move = (e: PointerEvent) => {
+      const state = fillDrag.current;
+      if (!state) return;
+      e.preventDefault();
+      const wrap = grid.current?.querySelector<HTMLElement>(".table-scroll");
+      if (wrap) {
+        const box = wrap.getBoundingClientRect();
+        if (e.clientY > box.bottom - 26) wrap.scrollTop += 14;
+        else if (e.clientY < box.top + 26) wrap.scrollTop -= 14;
+      }
+      const rows = Array.from(
+        grid.current?.querySelectorAll<HTMLElement>(
+          "tbody tr[data-row-id]",
+        ) || [],
+      );
+      let target = state.source.bottom;
+      rows.forEach((row, index) => {
+        if (index <= state.source.bottom) return;
+        if (e.clientY >= row.getBoundingClientRect().top) target = index;
+      });
+      target = Math.min(target, gridRows.length - 1);
+      if (target === state.targetRow) return;
+      state.targetRow = target;
+      setCellRange(
+        rangeForRect({
+          top: state.source.top,
+          bottom: target,
+          left: state.source.left,
+          right: state.source.right,
+        }),
+      );
+    };
+    const stop = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", finish);
+      document.removeEventListener("keydown", cancel);
+      document.body.classList.remove("fill-dragging");
+      fillDrag.current = null;
+      fillStop.current = () => {};
+      setFillActive(false);
+    };
+    const finish = () => {
+      const state = fillDrag.current;
+      stop();
+      if (state && state.targetRow > state.source.bottom)
+        fillCells(state.source, state.targetRow);
+    };
+    const cancel = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      const state = fillDrag.current;
+      stop();
+      if (state) setCellRange(rangeForRect(state.source));
+    };
+    fillStop.current = stop;
+    document.addEventListener("pointermove", move, { passive: false });
+    document.addEventListener("pointerup", finish);
+    document.addEventListener("keydown", cancel);
+  }
+  const gridKey = (event: React.KeyboardEvent) => {
+    const target = event.target as HTMLElement;
+    if (
+      target.closest("input, textarea, [contenteditable='true'], [role='menu']")
+    )
+      return;
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      ["z", "y"].includes(event.key.toLowerCase())
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.shiftKey || event.key.toLowerCase() === "y") redo(databaseId);
+      else undo(databaseId);
+      return;
+    }
+    if (!target.closest("td[data-field-id]")) return;
+    const range = rangeRef.current;
+    if (!range) return;
+    const head = range.head;
+    const ri = gridRows.findIndex((row) => row.id === head.row),
+      ci = visibleFields.findIndex((field) => field.id === head.field);
+    if (
+      target.tagName === "TD" &&
+      event.key.length === 1 &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey
+    ) {
+      const button = target.querySelector<HTMLButtonElement>(
+        "button.cell-value",
+      );
+      if (button?.closest(".cell-text")) {
+        event.preventDefault();
+        button.focus();
+        button.dispatchEvent(
+          new KeyboardEvent("keydown", { key: event.key, bubbles: true }),
+        );
+      }
+      return;
+    }
+    if (
+      ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(
+        event.key,
+      )
+    ) {
+      event.preventDefault();
+      const next = { r: ri, c: ci };
+      if (event.key === "ArrowUp") next.r--;
+      if (event.key === "ArrowDown") next.r++;
+      if (event.key === "ArrowLeft") next.c--;
+      if (event.key === "ArrowRight") next.c++;
+      if (event.key === "Tab") {
+        next.c += event.shiftKey ? -1 : 1;
+        if (next.c < 0) {
+          next.c = visibleFields.length - 1;
+          next.r--;
+        }
+        if (next.c >= visibleFields.length) {
+          next.c = 0;
+          next.r++;
+        }
+      }
+      const row = gridRows[Math.max(0, Math.min(gridRows.length - 1, next.r))];
+      const field =
+        visibleFields[Math.max(0, Math.min(visibleFields.length - 1, next.c))];
+      if (!row || !field) return;
+      const point = { row: row.id, field: field.id };
+      setCellRange({
+        anchor: event.shiftKey && event.key !== "Tab" ? range.anchor : point,
+        head: point,
+      });
+      if (event.key === "Tab" && target.tagName === "BUTTON") {
+        const rowEl = Array.from(
+          grid.current?.querySelectorAll<HTMLElement>("tr[data-row-id]") || [],
+        ).find((el) => el.dataset.rowId === point.row);
+        const td = Array.from(
+          rowEl?.querySelectorAll<HTMLElement>("td[data-field-id]") || [],
+        ).find((el) => el.dataset.fieldId === point.field);
+        if (readonly(field)) {
+          const previous = visibleFields
+            .slice(0, next.c)
+            .reverse()
+            .find((item) => !readonly(item));
+          const previousCell = Array.from(
+            rowEl?.querySelectorAll<HTMLElement>("td[data-field-id]") || [],
+          ).find((el) => el.dataset.fieldId === previous?.id);
+          previousCell
+            ?.querySelector<HTMLButtonElement>("button.cell-value")
+            ?.focus();
+        } else
+          td?.querySelector<HTMLButtonElement>("button.cell-value")?.focus();
+      } else focusCell(point);
+      return;
+    }
+    if ((event.key === "Backspace" || event.key === "Delete") && selectedRect) {
+      event.preventDefault();
+      const ops: Op[] = [];
+      for (const row of gridRows.slice(
+        selectedRect.top,
+        selectedRect.bottom + 1,
+      )) {
+        const values = { ...row.original.values };
+        for (const field of visibleFields.slice(
+          selectedRect.left,
+          selectedRect.right + 1,
+        )) {
+          if (readonly(field)) continue;
+          values[field.id] =
+            field.type === "checkbox"
+              ? false
+              : field.type === "multiSelect"
+                ? []
+                : null;
+        }
+        ops.push({
+          entity: "records",
+          id: row.id,
+          action: "set",
+          data: {
+            ...row.original,
+            values,
+            updatedAt: new Date().toISOString(),
+          },
+        });
+      }
+      mutate(ops);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setCellRange(null);
+      (document.activeElement as HTMLElement | null)?.blur();
+      return;
+    }
+    if (event.key === "Enter" || event.key === "F2") {
+      const cell = target.closest("td");
+      if (target === cell) {
+        event.preventDefault();
+        cell?.querySelector<HTMLButtonElement>("button.cell-value")?.click();
+      }
+    }
+  };
+  if (!db) return <div className="empty-state">数据表格不存在</div>;
   return (
-    <div ref={grid} className={"database-grid " + (embedded ? "embedded" : "")}>
+    <div
+      ref={grid}
+      className={"database-grid " + (embedded ? "embedded" : "")}
+      tabIndex={-1}
+      onKeyDown={gridKey}
+      onFocusCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (!["BUTTON", "INPUT", "TD"].includes(target.tagName)) return;
+        const td = target.closest<HTMLElement>("td[data-field-id]");
+        const tr = td?.closest<HTMLElement>("tr[data-row-id]");
+        if (
+          !td?.dataset.fieldId ||
+          !tr?.dataset.rowId ||
+          td.dataset.fieldId === "_select"
+        )
+          return;
+        const point = { row: tr.dataset.rowId, field: td.dataset.fieldId };
+        if (
+          rangeRef.current?.head.row === point.row &&
+          rangeRef.current.head.field === point.field
+        )
+          return;
+        setCellRange({ anchor: point, head: point });
+      }}
+      onCopy={(event) => {
+        if (
+          !(event.target as HTMLElement).closest("td[data-field-id]") ||
+          (event.target as HTMLElement).closest(
+            "input, textarea, [contenteditable='true']",
+          ) ||
+          !selectedRect
+        )
+          return;
+        const text = gridRows
+          .slice(selectedRect.top, selectedRect.bottom + 1)
+          .map((row) =>
+            visibleFields
+              .slice(selectedRect.left, selectedRect.right + 1)
+              .map((field) =>
+                formatValue(safeValue(field, row.original, fields), field),
+              )
+              .join("\t"),
+          )
+          .join("\n");
+        event.clipboardData.setData("text/plain", text);
+        event.preventDefault();
+      }}
+    >
       {embedded && (
         <div className="embedded-heading">
           <DatabaseIcon size={17} />
           <strong>{db.name}</strong>
-          <span className="muted small">共享数据库</span>
+          <span className="muted small">共享数据表格</span>
         </div>
       )}
       <div className="database-topline">
@@ -1844,6 +2572,24 @@ export function DatabaseGrid({
           </Menu>
         </div>
         <div className="toolbar-right">
+          <button
+            className="icon-button database-history"
+            aria-label="撤销数据表格操作"
+            title="撤销数据表格操作 ⌘/Ctrl+Z"
+            disabled={!canUndo(databaseId)}
+            onClick={() => undo(databaseId)}
+          >
+            <Undo2 size={16} />
+          </button>
+          <button
+            className="icon-button database-history"
+            aria-label="重做数据表格操作"
+            title="重做数据表格操作 ⌘/Ctrl+Shift+Z"
+            disabled={!canRedo(databaseId)}
+            onClick={() => redo(databaseId)}
+          >
+            <Redo2 size={16} />
+          </button>
           {searchOpen ? (
             <div className="table-search">
               <Search size={14} />
@@ -2006,7 +2752,10 @@ export function DatabaseGrid({
         <div className="table-scroll">
           <table
             className="data-table"
-            style={{ width: table.getTotalSize() + 48 }}
+            style={{
+              width: "100%",
+              minWidth: table.getTotalSize() + 48,
+            }}
           >
             <thead>
               {table.getHeaderGroups().map((hg) => (
@@ -2104,8 +2853,79 @@ export function DatabaseGrid({
                   group={group}
                   columns={table.getVisibleLeafColumns().length + 1}
                   grouped={!!view?.groupBy}
+                  collapsed={!!view?.groupBy && collapsedGroups.has(group.key)}
+                  onToggle={() => {
+                    setCellRange(null);
+                    setCollapsedGroups((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(group.key)) next.delete(group.key);
+                      else next.add(group.key);
+                      return next;
+                    });
+                  }}
                   renderSummary={renderSummary}
                   selection={selection}
+                  selectionClass={selectionClass}
+                  fillHandle={fillHandle}
+                  fillActive={fillActive}
+                  onFillPointerDown={beginFill}
+                  onCellPointerDown={(
+                    event: React.PointerEvent,
+                    row: string,
+                    field: string,
+                  ) => {
+                    if (
+                      field === "_select" ||
+                      (event.target as HTMLElement).closest(
+                        "input, textarea, .row-drag-grip, .open-record",
+                      )
+                    )
+                      return;
+                    const point = { row, field };
+                    const anchor =
+                      event.shiftKey && rangeRef.current
+                        ? rangeRef.current.anchor
+                        : point;
+                    cellPointer.current = { anchor, moved: event.shiftKey };
+                    setCellRange({ anchor, head: point });
+                    if (event.button === 0) focusCell(point);
+                    if (event.shiftKey) event.preventDefault();
+                  }}
+                  onCellPointerEnter={(
+                    event: React.PointerEvent,
+                    row: string,
+                    field: string,
+                  ) => {
+                    if (
+                      event.buttons !== 1 ||
+                      !cellPointer.current ||
+                      field === "_select"
+                    )
+                      return;
+                    const point = { row, field };
+                    if (
+                      point.row !== cellPointer.current.anchor.row ||
+                      point.field !== cellPointer.current.anchor.field
+                    ) {
+                      cellPointer.current.moved = true;
+                      setCellRange({
+                        anchor: cellPointer.current.anchor,
+                        head: point,
+                      });
+                    }
+                  }}
+                  onCellClick={(
+                    event: React.MouseEvent,
+                    row: string,
+                    field: string,
+                  ) => {
+                    if (cellPointer.current?.moved) {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      focusCell({ row, field });
+                    }
+                    cellPointer.current = null;
+                  }}
                   onPaste={(
                     event: React.ClipboardEvent,
                     row: string,
@@ -2519,7 +3339,7 @@ export function DatabaseGrid({
         open={bulkDelete}
         onOpenChange={setBulkDelete}
         title={`删除 ${selectedIds.length} 条记录？`}
-        description="记录及其正文将永久删除。此操作无法撤销。"
+        description="删除后可通过数据表格工具栏的撤销恢复。刷新页面后撤销历史会清空。"
         onConfirm={() => {
           mutate(
             selectedIds.map((id) => ({
@@ -2540,6 +3360,22 @@ export function DatabaseGrid({
         {detail && (
           <>
             <div className="record-detail-tools">
+              <button
+                className="icon-button"
+                aria-label="撤销数据表格操作"
+                disabled={!canUndo(databaseId)}
+                onClick={() => undo(databaseId)}
+              >
+                <Undo2 size={16} />
+              </button>
+              <button
+                className="icon-button"
+                aria-label="重做数据表格操作"
+                disabled={!canRedo(databaseId)}
+                onClick={() => redo(databaseId)}
+              >
+                <Redo2 size={16} />
+              </button>
               <span className="muted small">{db.name}</span>
               <Menu
                 trigger={
@@ -2576,7 +3412,9 @@ export function DatabaseGrid({
                 </MenuItem>
               </Menu>
             </div>
-            <input
+            <textarea
+              ref={recordTitleRef}
+              rows={1}
               className="record-title"
               aria-label="记录标题"
               placeholder="未命名"
@@ -2584,6 +3422,11 @@ export function DatabaseGrid({
               onChange={(e) =>
                 titleField && updateValue(detail, titleField, e.target.value)
               }
+              onInput={(e) => {
+                const element = e.currentTarget;
+                element.style.height = "auto";
+                element.style.height = element.scrollHeight + "px";
+              }}
             />
             <div className="record-properties">
               {fields
@@ -2599,6 +3442,7 @@ export function DatabaseGrid({
                       row={detail}
                       fields={fields}
                       onChange={(value) => updateValue(detail, f, value)}
+                      mobile={isMobile}
                       onMobile={() => showCell(detail, f)}
                       onOpen={() => {}}
                     />
@@ -2607,6 +3451,7 @@ export function DatabaseGrid({
             </div>
             <div className="record-body-label">笔记与详情</div>
             <Editor
+              key={detail.id}
               compact
               content={detail.content || emptyDoc()}
               onChange={(content) =>
@@ -2657,6 +3502,28 @@ export function DatabaseGrid({
                       : cellDraft === option) && <Check size={17} />}
                   </button>
                 ))}
+                <div className="mobile-new-option">
+                  <input
+                    placeholder="新建选项…"
+                    aria-label="新建选项"
+                    value={newOption}
+                    onChange={(e) => setNewOption(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return;
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        addMobileOption();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    disabled={!newOption.trim()}
+                    onClick={addMobileOption}
+                  >
+                    添加
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="text-button"
@@ -2678,47 +3545,16 @@ export function DatabaseGrid({
               </label>
             ) : cellField.type === "date" ? (
               <>
-                <label className="form-label">
-                  开始日期
-                  <input
-                    type={cellTime ? "datetime-local" : "date"}
-                    value={cellDraft}
-                    onChange={(e) => setCellDraft(e.target.value)}
-                  />
-                </label>
-                <label className="form-label">
-                  结束日期（可选）
-                  <input
-                    type={cellTime ? "datetime-local" : "date"}
-                    value={cellEnd}
-                    onChange={(e) => setCellEnd(e.target.value)}
-                  />
-                </label>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={cellTime}
-                    onChange={(e) => {
-                      const time = e.target.checked;
-                      setCellTime(time);
-                      setCellDraft((v: string) =>
-                        v
-                          ? time
-                            ? v.slice(0, 10) + "T09:00"
-                            : v.slice(0, 10)
-                          : "",
-                      );
-                      setCellEnd((v) =>
-                        v
-                          ? time
-                            ? v.slice(0, 10) + "T18:00"
-                            : v.slice(0, 10)
-                          : "",
-                      );
-                    }}
-                  />
-                  包含时间
-                </label>
+                <DateRangeCalendar
+                  start={cellDraft || ""}
+                  end={cellEnd}
+                  time={cellTime}
+                  onChange={(next) => {
+                    setCellDraft(next.start);
+                    setCellEnd(next.end);
+                    setCellTime(next.time);
+                  }}
+                />
                 <button
                   type="button"
                   className="text-button"
@@ -2863,6 +3699,7 @@ function FilterValue({
   value: string;
   onChange: (v: string) => void;
 }) {
+  const [open, setOpen] = useState(false);
   if (field && ["select", "status", "checkbox"].includes(field.type))
     return (
       <Select
@@ -2887,17 +3724,58 @@ function FilterValue({
             ))}
       </Select>
     );
+  if (field && ["date", "created", "updated"].includes(field.type))
+    return (
+      <Popover.Root open={open} onOpenChange={setOpen}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            className="filter-date-trigger"
+            aria-label="筛选值"
+          >
+            <CalendarDays size={13} />
+            <span>{value || "选择日期"}</span>
+          </button>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content
+            className="date-popover filter-date-popover"
+            align="start"
+            sideOffset={5}
+            collisionPadding={12}
+          >
+            <SingleDateCalendar
+              value={value}
+              onChange={(next) => {
+                onChange(next);
+                if (next) setOpen(false);
+              }}
+            />
+            <div className="option-footer date-footer">
+              <button
+                type="button"
+                onClick={() => {
+                  onChange("");
+                  setOpen(false);
+                }}
+              >
+                清空
+              </button>
+              <span>
+                <Popover.Close asChild>
+                  <button type="button">关闭</button>
+                </Popover.Close>
+              </span>
+            </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
+    );
   return (
     <input
       aria-label="筛选值"
       placeholder="条件值"
-      type={
-        field && numeric(field)
-          ? "number"
-          : field && ["date", "created", "updated"].includes(field.type)
-            ? "date"
-            : "text"
-      }
+      type={field && numeric(field) ? "number" : "text"}
       value={value}
       onChange={(e) => onChange(e.target.value)}
     />
@@ -2907,17 +3785,25 @@ function GroupRows({
   group,
   columns,
   grouped,
+  collapsed,
+  onToggle,
   renderSummary,
   selection,
+  selectionClass,
+  fillHandle,
+  fillActive,
+  onFillPointerDown,
+  onCellPointerDown,
+  onCellPointerEnter,
+  onCellClick,
   onPaste,
 }: any) {
-  const [collapsed, setCollapsed] = useState(false);
   return (
     <>
       {grouped && (
         <tr className="group-row">
           <td colSpan={columns}>
-            <button onClick={() => setCollapsed(!collapsed)}>
+            <button onClick={onToggle}>
               <ChevronDown
                 size={14}
                 style={{ transform: collapsed ? "rotate(-90deg)" : undefined }}
@@ -2939,9 +3825,35 @@ function GroupRows({
               <td
                 key={cell.id}
                 data-field-id={cell.column.id}
+                tabIndex={cell.column.id === "_select" ? undefined : 0}
+                className={selectionClass(row.id, cell.column.id)}
+                onPointerDown={(e) =>
+                  onCellPointerDown(e, row.id, cell.column.id)
+                }
+                onPointerEnter={(e) =>
+                  onCellPointerEnter(e, row.id, cell.column.id)
+                }
+                onClickCapture={(e) => onCellClick(e, row.id, cell.column.id)}
                 onPaste={(e) => onPaste(e, row.id, cell.column.id)}
               >
                 {renderTemplate(cell.column.columnDef.cell, cell.getContext())}
+                {fillHandle?.row === row.id &&
+                  fillHandle.field === cell.column.id && (
+                    <button
+                      type="button"
+                      className={
+                        "fill-handle " + (fillActive ? "dragging" : "")
+                      }
+                      aria-label="下拉填充数据"
+                      tabIndex={-1}
+                      onClick={(e) => e.stopPropagation()}
+                      onPointerDown={(e) =>
+                        onFillPointerDown(e, fillHandle.source)
+                      }
+                    >
+                      <span className="fill-handle-tip">下拉填充数据</span>
+                    </button>
+                  )}
               </td>
             ))}
             <td />

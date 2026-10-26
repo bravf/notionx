@@ -3,6 +3,8 @@ dist/
 data/*
 !data/.gitkeep
 .env
+.env.*
+!.env.example
 *.tsbuildinfo
 .DS_Store
 test-results/

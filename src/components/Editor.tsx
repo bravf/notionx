@@ -1,5 +1,7 @@
+import { TableTools } from "./TableTools";
+import { TextSelection } from "@tiptap/pm/state";
 import { EditorToolbar } from "./EditorToolbar";
-import { BlockControls, blockAction } from "./BlockControls";
+import { BlockControls } from "./BlockControls";
 import {
   useEditor,
   EditorContent,
@@ -7,6 +9,7 @@ import {
   NodeViewWrapper,
 } from "@tiptap/react";
 import { Node, mergeAttributes } from "@tiptap/core";
+import type { EditorEvents } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import TaskList from "@tiptap/extension-task-list";
@@ -24,6 +27,7 @@ import {
   CheckSquare,
   Quote,
   Code2,
+  Code as InlineCode,
   Minus,
   Table2,
   Lightbulb,
@@ -33,19 +37,19 @@ import {
   Italic,
   Strikethrough,
   Link,
-  ArrowUp,
-  ArrowDown,
-  Copy,
-  Trash2,
-  MoreHorizontal,
   Plus,
   Undo2,
   Redo2,
+  IndentIncrease,
+  IndentDecrease,
+  MoreHorizontal,
 } from "lucide-react";
 import type { Doc } from "../types";
 import { useStore } from "../store";
+import { BlockSelectionExtension } from "../lib/blockSelection";
 import { DatabaseGrid } from "./DatabaseGrid";
-import { Menu, MenuItem, MenuDivider, Modal } from "./ui";
+import { Modal } from "./ui";
+import { selectCurrentBlock } from "../lib/blockSelection";
 const Callout = Node.create({
   name: "callout",
   group: "block",
@@ -71,11 +75,57 @@ function EmbedView({ node, selected }: any) {
       {data.databases.some((d) => d.id === node.attrs.databaseId) ? (
         <DatabaseGrid databaseId={node.attrs.databaseId} embedded />
       ) : (
-        <div className="empty-state">数据库已不存在</div>
+        <div className="empty-state">数据表格已不存在</div>
       )}
     </NodeViewWrapper>
   );
 }
+function PageReferenceView({ node }: any) {
+  const { data } = useStore();
+  const page = data.pages.find(
+    (page) => page.id === node.attrs.pageId && !page.deleted,
+  );
+  return (
+    <NodeViewWrapper
+      as="span"
+      className={"page-reference " + (!page ? "missing" : "")}
+      contentEditable={false}
+    >
+      <a
+        href={"#page=" + node.attrs.pageId}
+        data-page-reference={node.attrs.pageId}
+        title={page ? "打开 " + page.title : "页面已删除"}
+      >
+        {page ? page.icon + " " + (page.title || "未命名") : "页面已删除"}
+      </a>
+    </NodeViewWrapper>
+  );
+}
+const PageReference = Node.create({
+  name: "pageReference",
+  group: "inline",
+  inline: true,
+  atom: true,
+  addAttributes: () => ({ pageId: { default: null } }),
+  parseHTML: () => [
+    {
+      tag: "a[data-page-reference]",
+      getAttrs: (element) => ({
+        pageId: (element as HTMLElement).dataset.pageReference,
+      }),
+    },
+  ],
+  renderHTML: ({ node }) => [
+    "a",
+    {
+      href: "#page=" + node.attrs.pageId,
+      "data-page-reference": node.attrs.pageId,
+    },
+    "页面引用",
+  ],
+  addNodeView: () => ReactNodeViewRenderer(PageReferenceView),
+  renderText: ({ node }) => "#page=" + node.attrs.pageId,
+});
 const DatabaseEmbed = Node.create({
   name: "databaseEmbed",
   group: "block",
@@ -109,17 +159,23 @@ export function Editor({
       left: number;
     } | null>(null),
     [selected, setSelected] = useState(0),
-    [toolbarMenuOpen, setToolbarMenuOpen] = useState(false),
     [embed, setEmbed] = useState(false),
     [linkOpen, setLinkOpen] = useState(false),
     [link, setLink] = useState(""),
+    [pageQuery, setPageQuery] = useState(""),
+    [mobileEditing, setMobileEditing] = useState(false),
+    [keyboardBottom, setKeyboardBottom] = useState(0),
     [version, setVersion] = useState(0);
   const container = useRef<HTMLDivElement>(null),
     file = useRef<HTMLInputElement>(null),
     last = useRef(""),
     slashRef = useRef(slash),
+    dismissedSlash = useRef<number | null>(null),
     commandsRef = useRef<any[]>([]),
-    selectedRef = useRef(0);
+    selectedRef = useRef(0),
+    imageInput = useRef<
+      (files: File[], range?: { from: number; to: number }) => void
+    >(() => {});
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -141,12 +197,70 @@ export function Editor({
       Image.configure({ allowBase64: true }),
       Callout,
       DatabaseEmbed,
+      PageReference,
+      BlockSelectionExtension,
     ],
     content,
     editorProps: {
       attributes: { class: "block-editor", "aria-label": "页面正文" },
+      handlePaste: (view, event) => {
+        const files = Array.from(event.clipboardData?.files || []).filter((f) =>
+          f.type.startsWith("image/"),
+        );
+        if (!files.length) return false;
+        event.preventDefault();
+        let range = {
+          from: view.state.selection.from,
+          to: view.state.selection.to,
+        };
+        const native = view.dom.ownerDocument.getSelection();
+        // Native selectionchange may still be pending when paste arrives.
+        // Capture the visible text range before asynchronous file reads.
+        if (
+          view.state.selection instanceof TextSelection &&
+          native &&
+          !native.isCollapsed &&
+          native.anchorNode &&
+          native.focusNode &&
+          view.dom.contains(native.anchorNode) &&
+          view.dom.contains(native.focusNode)
+        ) {
+          const anchor = view.posAtDOM(native.anchorNode, native.anchorOffset);
+          const head = view.posAtDOM(native.focusNode, native.focusOffset);
+          range = { from: Math.min(anchor, head), to: Math.max(anchor, head) };
+        }
+        imageInput.current(files, range);
+        return true;
+      },
+      handleDrop: (view, event, _slice, moved) => {
+        if (moved) return false;
+        const files = Array.from(event.dataTransfer?.files || []).filter((f) =>
+          f.type.startsWith("image/"),
+        );
+        if (!files.length) return false;
+        const drop = view.posAtCoords({
+          left: event.clientX,
+          top: event.clientY,
+        });
+        if (!drop) return false;
+        event.preventDefault();
+        imageInput.current(files, { from: drop.pos, to: drop.pos });
+        return true;
+      },
       handleKeyDown: (view, event) => {
-        if (!slashRef.current || event.isComposing) return false;
+        if (event.isComposing) return false;
+        if (
+          (event.metaKey || event.ctrlKey) &&
+          event.key.toLowerCase() === "k" &&
+          !view.state.selection.empty
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          setLink(editor?.getAttributes("link").href || "");
+          setLinkOpen(true);
+          return true;
+        }
+        if (!slashRef.current) return false;
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
           setSelected(
@@ -164,6 +278,7 @@ export function Editor({
           return true;
         }
         if (event.key === "Escape") {
+          dismissedSlash.current = slashRef.current.from;
           setSlash(null);
           return true;
         }
@@ -188,10 +303,30 @@ export function Editor({
   }, [content, editor]);
   useEffect(() => {
     if (!editor) return;
+    const closeSlash = () => setSlash(null);
+    const focusEnd = () => {
+      if (
+        editor.isDestroyed ||
+        (compact && !container.current?.closest("[role='dialog']"))
+      )
+        return;
+      if (!compact && document.querySelector(".record-modal")) return;
+      editor.chain().focus("end").scrollIntoView().run();
+    };
+    editor.on("blur", closeSlash);
+    window.addEventListener("focus-page-editor", focusEnd);
+    return () => {
+      editor.off("blur", closeSlash);
+      window.removeEventListener("focus-page-editor", focusEnd);
+    };
+  }, [editor]);
+  useEffect(() => {
+    if (!editor) return;
     const update = () => {
       setVersion((v) => v + 1);
       const { $from, empty } = editor.state.selection;
-      if (!empty) {
+      if (!empty || $from.parent.type.spec.code) {
+        dismissedSlash.current = null;
         setSlash(null);
         return;
       }
@@ -204,6 +339,11 @@ export function Editor({
       const match = text.match(/(?:^|\s)\/([^/]*)$/);
       if (match && match[1].length < 20) {
         const from = $from.pos - match[1].length - 1;
+        if (dismissedSlash.current === from) {
+          setSlash(null);
+          return;
+        }
+        dismissedSlash.current = null;
         const coords = editor.view.coordsAtPos(from);
         const rect = container.current?.getBoundingClientRect();
         setSlash((old) => {
@@ -226,11 +366,43 @@ export function Editor({
           if (old?.query !== next.query) setSelected(0);
           return next;
         });
-      } else setSlash(null);
+      } else {
+        dismissedSlash.current = null;
+        setSlash(null);
+      }
     };
     editor.on("transaction", update);
     return () => {
       editor.off("transaction", update);
+    };
+  }, [editor]);
+  useEffect(() => {
+    if (!editor) return;
+    const updateFocus = () => {
+      const active = document.activeElement;
+      setMobileEditing(!!active && !!container.current?.contains(active));
+    };
+    const updateViewport = () => {
+      const viewport = window.visualViewport;
+      setKeyboardBottom(
+        viewport
+          ? Math.max(
+              0,
+              window.innerHeight - viewport.height - viewport.offsetTop,
+            )
+          : 0,
+      );
+    };
+    document.addEventListener("focusin", updateFocus);
+    document.addEventListener("focusout", updateFocus);
+    window.visualViewport?.addEventListener("resize", updateViewport);
+    window.visualViewport?.addEventListener("scroll", updateViewport);
+    updateViewport();
+    return () => {
+      document.removeEventListener("focusin", updateFocus);
+      document.removeEventListener("focusout", updateFocus);
+      window.visualViewport?.removeEventListener("resize", updateViewport);
+      window.visualViewport?.removeEventListener("scroll", updateViewport);
     };
   }, [editor]);
   useEffect(() => {
@@ -241,6 +413,75 @@ export function Editor({
   slashRef.current = slash;
   selectedRef.current = selected;
   if (!editor) return null;
+  imageInput.current = (files, range = editor.state.selection) => {
+    let from = range.from,
+      to = range.to;
+    let cancelled = false;
+    const images: { type: string; attrs: { src: string; alt: string } }[] = [];
+    const mapPosition = ({
+      transaction,
+      appendedTransactions,
+    }: EditorEvents["transaction"]) => {
+      for (const tr of [transaction, ...appendedTransactions]) {
+        if (tr.getMeta("preventUpdate")) {
+          cancel();
+          return;
+        }
+        const start = tr.mapping.mapResult(from, 1);
+        const end = tr.mapping.mapResult(to, from === to ? 1 : -1);
+        if (start.deletedAcross && end.deletedAcross) {
+          cancel();
+          return;
+        }
+        from = start.pos;
+        to = Math.max(from, end.pos);
+      }
+    };
+    const cleanup = () => {
+      editor.off("transaction", mapPosition);
+      editor.off("destroy", cancel);
+    };
+    const cancel = () => {
+      cancelled = true;
+      cleanup();
+    };
+    editor.on("transaction", mapPosition);
+    editor.on("destroy", cancel);
+    const insert = (index: number) => {
+      if (cancelled || editor.isDestroyed) {
+        cleanup();
+        return;
+      }
+      const file = files[index];
+      if (!file) {
+        cleanup();
+        if (images.length)
+          editor.commands.insertContentAt({ from, to }, images, {
+            updateSelection: false,
+          });
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        toast("图片大小不能超过 5MB");
+        insert(index + 1);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        images.push({
+          type: "image",
+          attrs: { src: String(reader.result), alt: file.name },
+        });
+        insert(index + 1);
+      };
+      reader.onerror = () => {
+        toast("图片读取失败");
+        insert(index + 1);
+      };
+      reader.readAsDataURL(file);
+    };
+    insert(0);
+  };
   const exec = (fn: () => void) => {
     if (slash)
       editor
@@ -341,8 +582,8 @@ export function Editor({
         ),
     },
     {
-      label: "数据库",
-      hint: "嵌入带属性和计算的数据库",
+      label: "数据表格",
+      hint: "嵌入带属性和计算的数据表格",
       icon: DatabaseIcon,
       keywords: "database shujuku",
       run: () => exec(() => setEmbed(true)),
@@ -374,10 +615,6 @@ export function Editor({
         .includes(slash.query.toLowerCase()),
   );
   commandsRef.current = filtered;
-  const moveBlock = (direction: number) =>
-    blockAction(editor, direction < 0 ? "up" : "down");
-  const duplicateBlock = () => blockAction(editor, "duplicate");
-  const deleteBlock = () => blockAction(editor, "delete");
   return (
     <div
       ref={container}
@@ -385,37 +622,7 @@ export function Editor({
       data-editor-version={version}
     >
       <BlockControls editor={editor} />
-      <EditorToolbar
-        editor={editor}
-        menuOpen={toolbarMenuOpen}
-        suppressed={!!slash || linkOpen || embed}
-      >
-        <Menu
-          onOpenChange={setToolbarMenuOpen}
-          modal={false}
-          onCloseAutoFocus={(event) => {
-            if (editor.isFocused) event.preventDefault();
-          }}
-          trigger={
-            <button className="editor-type">
-              {editor.isActive("heading")
-                ? "标题"
-                : editor.isActive("taskList")
-                  ? "待办"
-                  : "正文"}
-              <span>⌄</span>
-            </button>
-          }
-          align="start"
-        >
-          {commands.slice(0, 10).map((c) => (
-            <MenuItem key={c.label} onClick={c.run}>
-              <c.icon size={15} />
-              {c.label}
-            </MenuItem>
-          ))}
-        </Menu>
-        <span className="toolbar-divider" />
+      <EditorToolbar editor={editor} suppressed={!!slash || linkOpen || embed}>
         <button
           aria-label="加粗"
           className={editor.isActive("bold") ? "active" : ""}
@@ -438,7 +645,15 @@ export function Editor({
           <Strikethrough size={16} />
         </button>
         <button
+          aria-label="行内代码"
+          className={editor.isActive("code") ? "active" : ""}
+          onClick={() => editor.chain().focus().toggleCode().run()}
+        >
+          <InlineCode size={16} />
+        </button>
+        <button
           aria-label="添加链接"
+          className={editor.isActive("link") ? "active" : ""}
           onClick={() => {
             setLink(editor.getAttributes("link").href || "");
             setLinkOpen(true);
@@ -446,77 +661,9 @@ export function Editor({
         >
           <Link size={16} />
         </button>
-        <span className="toolbar-divider" />
-        <button
-          aria-label="撤销"
-          disabled={!editor.can().undo()}
-          onClick={() => editor.chain().focus().undo().run()}
-        >
-          <Undo2 size={16} />
-        </button>
-        <button
-          aria-label="重做"
-          disabled={!editor.can().redo()}
-          onClick={() => editor.chain().focus().redo().run()}
-        >
-          <Redo2 size={16} />
-        </button>
-        <Menu
-          onOpenChange={setToolbarMenuOpen}
-          modal={false}
-          onCloseAutoFocus={(event) => {
-            if (editor.isFocused) event.preventDefault();
-          }}
-          trigger={
-            <button aria-label="块操作">
-              <MoreHorizontal size={18} />
-            </button>
-          }
-        >
-          <MenuItem onClick={() => moveBlock(-1)}>
-            <ArrowUp size={15} />
-            上移此块
-          </MenuItem>
-          <MenuItem onClick={() => moveBlock(1)}>
-            <ArrowDown size={15} />
-            下移此块
-          </MenuItem>
-          <MenuItem onClick={duplicateBlock}>
-            <Copy size={15} />
-            复制此块
-          </MenuItem>
-          <MenuDivider />
-          <MenuItem danger onClick={deleteBlock}>
-            <Trash2 size={15} />
-            删除此块
-          </MenuItem>
-        </Menu>
       </EditorToolbar>
       <EditorContent editor={editor} />
-      {editor.isActive("table") && (
-        <div className="table-edit-tools">
-          <button onClick={() => editor.chain().focus().addRowAfter().run()}>
-            ＋ 行
-          </button>
-          <button onClick={() => editor.chain().focus().addColumnAfter().run()}>
-            ＋ 列
-          </button>
-          <button onClick={() => editor.chain().focus().deleteRow().run()}>
-            删除行
-          </button>
-          <button onClick={() => editor.chain().focus().deleteColumn().run()}>
-            删除列
-          </button>
-          <button
-            onClick={() => editor.chain().focus().toggleHeaderRow().run()}
-          >
-            切换表头
-          </button>
-          <button onClick={() => editor.chain().focus().deleteTable().run()}>
-            删除表格
-          </button>
-        </div>
-      )}
+      <TableTools editor={editor} />
       {slash && (
         <div
           className="slash-menu"
@@ -556,12 +703,114 @@ export function Editor({
       <button
         className="add-block"
         onClick={() => {
-          editor.chain().focus("end").insertContent("<p>/</p>").run();
+          const selection = editor.state.selection;
+          const $from = selection.$from;
+          const textblock = $from.parent;
+          const pos = textblock.isTextblock ? $from.after() : selection.to;
+          const paragraph = editor.schema.nodes.paragraph.create(
+            null,
+            editor.schema.text("/"),
+          );
+          const tr = editor.state.tr.insert(pos, paragraph);
+          tr.setSelection(TextSelection.create(tr.doc, pos + 2));
+          dismissedSlash.current = null;
+          editor.view.dispatch(tr.scrollIntoView());
+          editor.view.focus();
         }}
       >
         <Plus size={16} />
         添加内容
       </button>
+      <div
+        className={"mobile-editor-actions " + (mobileEditing ? "editing" : "")}
+        style={{ bottom: keyboardBottom }}
+        role="toolbar"
+        aria-label="手机编辑工具"
+      >
+        <button
+          aria-label="在当前位置添加内容"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            editor.chain().focus().insertContent("/").run();
+            dismissedSlash.current = null;
+            editor.view.dispatch(
+              editor.state.tr.setMeta("addToHistory", false),
+            );
+          }}
+        >
+          <Plus size={19} />
+        </button>
+        <button
+          aria-label="块操作"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            selectCurrentBlock(editor.view);
+            editor.view.dom.dispatchEvent(new CustomEvent("open-block-menu"));
+          }}
+        >
+          <MoreHorizontal size={19} />
+        </button>
+        <button
+          aria-label="增加缩进"
+          disabled={
+            !editor
+              .can()
+              .sinkListItem(
+                editor.isActive("taskItem") ? "taskItem" : "listItem",
+              )
+          }
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() =>
+            editor
+              .chain()
+              .focus()
+              .sinkListItem(
+                editor.isActive("taskItem") ? "taskItem" : "listItem",
+              )
+              .run()
+          }
+        >
+          <IndentIncrease size={18} />
+        </button>
+        <button
+          aria-label="减少缩进"
+          disabled={
+            !editor
+              .can()
+              .liftListItem(
+                editor.isActive("taskItem") ? "taskItem" : "listItem",
+              )
+          }
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() =>
+            editor
+              .chain()
+              .focus()
+              .liftListItem(
+                editor.isActive("taskItem") ? "taskItem" : "listItem",
+              )
+              .run()
+          }
+        >
+          <IndentDecrease size={18} />
+        </button>
+        <button
+          aria-label="撤销正文操作"
+          disabled={!editor.can().undo()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => editor.chain().focus().undo().run()}
+        >
+          <Undo2 size={18} />
+        </button>
+        <button
+          aria-label="重做正文操作"
+          disabled={!editor.can().redo()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => editor.chain().focus().redo().run()}
+        >
+          <Redo2 size={18} />
+        </button>
+      </div>
       <input
         hidden
         ref={file}
@@ -574,22 +823,15 @@ export function Editor({
             toast("图片大小不能超过 5MB");
             return;
           }
-          const reader = new FileReader();
-          reader.onload = () =>
-            editor
-              .chain()
-              .focus()
-              .setImage({ src: String(reader.result), alt: f.name })
-              .run();
-          reader.readAsDataURL(f);
+          imageInput.current([f]);
           e.target.value = "";
         }}
       />
       <Modal
         open={embed}
         onOpenChange={setEmbed}
-        title="嵌入数据库"
-        description="视图共享同一份数据，编辑会同步到原数据库。"
+        title="嵌入数据表格"
+        description="视图共享同一份数据，编辑会同步到原数据表格。"
       >
         <div className="choice-list">
           {data.databases.map((db) => (
@@ -614,7 +856,7 @@ export function Editor({
           ))}
         </div>
         {!data.databases.length && (
-          <p className="muted">先在侧栏新建一个数据库。</p>
+          <p className="muted">先在侧栏新建一个数据表格。</p>
         )}
       </Modal>
       <Modal open={linkOpen} onOpenChange={setLinkOpen} title="插入链接">
@@ -659,9 +901,22 @@ export function Editor({
           </div>
         </form>
         <div className="menu-label">或链接到工作空间页面</div>
+        <input
+          className="page-link-search"
+          aria-label="搜索要引用的页面"
+          placeholder="搜索页面…"
+          value={pageQuery}
+          onChange={(e) => setPageQuery(e.target.value)}
+        />
         <div className="choice-list">
           {data.pages
-            .filter((p) => !p.deleted)
+            .filter(
+              (p) =>
+                !p.deleted &&
+                p.title
+                  .toLocaleLowerCase()
+                  .includes(pageQuery.toLocaleLowerCase()),
+            )
             .map((p) => (
               <button
                 key={p.id}
@@ -670,11 +925,8 @@ export function Editor({
                     .chain()
                     .focus()
                     .insertContent({
-                      type: "text",
-                      text: p.icon + " " + p.title,
-                      marks: [
-                        { type: "link", attrs: { href: "#page=" + p.id } },
-                      ],
+                      type: "pageReference",
+                      attrs: { pageId: p.id },
                     })
                     .run();
                   setLinkOpen(false);

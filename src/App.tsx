@@ -37,6 +37,7 @@ import {
   Sun,
   CheckCircle2,
   LayoutGrid,
+  PenLine,
 } from "lucide-react";
 import { StoreProvider, useStore } from "./store";
 import { Editor } from "./components/Editor";
@@ -49,7 +50,7 @@ import {
   MenuLabel,
   Confirm,
 } from "./components/ui";
-import type { Page, Field, Op } from "./types";
+import type { Page, Entry, Field, Op } from "./types";
 import { uid, emptyDoc, plainText, download } from "./types";
 const covers = [
   { id: "sage", name: "鼠尾草" },
@@ -107,7 +108,15 @@ function Workspace() {
     [collapsed, setCollapsed] = useState(false),
     [search, setSearch] = useState(false),
     [query, setQuery] = useState(""),
+    [searchIndex, setSearchIndex] = useState(0),
     [recentMode, setRecentMode] = useState(false),
+    [renaming, setRenaming] = useState<{ id: string; value: string } | null>(
+      null,
+    ),
+    [pageDragOver, setPageDragOver] = useState<{
+      id: string;
+      after: boolean;
+    } | null>(null),
     [recent, setRecent] = useState<string[]>(() => {
       try {
         return JSON.parse(localStorage.getItem("notionx-recent") || "[]");
@@ -128,6 +137,7 @@ function Workspace() {
     [parent, setParent] = useState(""),
     [permanent, setPermanent] = useState<Page | null>(null),
     [restoreData, setRestoreData] = useState<any>(null),
+    [pendingRecord, setPendingRecord] = useState<string | null>(null),
     [restoreConfirm, setRestoreConfirm] = useState(false),
     [expanded, setExpanded] = useState<Record<string, boolean>>({}),
     [offline, setOffline] = useState(!navigator.onLine),
@@ -135,29 +145,76 @@ function Workspace() {
     [today] = useState(new Date());
   const restoreFile = useRef<HTMLInputElement>(null),
     dragPage = useRef<string | null>(null),
-    scroll = useRef<HTMLElement>(null);
+    scroll = useRef<HTMLElement>(null),
+    titleRef = useRef<HTMLTextAreaElement>(null),
+    renameInput = useRef<HTMLInputElement>(null),
+    ignoreRenameBlur = useRef(false),
+    lastExpandedFor = useRef<string | null>(null);
   const pages = data.pages
       .filter((p) => !p.deleted)
       .sort((a, b) => a.order - b.order),
     deleted = data.pages.filter((p) => p.deleted),
     page = pages.find((p) => p.id === active);
+  const homePage = pages.find((p) => p.id === "home") || pages[0];
   const navigate = (id: string) => {
     location.hash = "page=" + id;
     setActive(id);
     setSidebar(false);
-    scroll.current?.scrollTo({ top: 0 });
+    scroll.current?.scrollTo({ top: 0, behavior: "instant" });
   };
+  const goHome = () => (homePage ? navigate(homePage.id) : startNew());
+  useEffect(() => {
+    // Opening a page through a link or search should reveal it in the tree.
+    const target = data.pages.find((p) => p.id === active && !p.deleted);
+    if (!target || lastExpandedFor.current === active) return;
+    lastExpandedFor.current = active;
+    setExpanded((previous) => {
+      const next = { ...previous };
+      let parent = target.parentId;
+      let changed = false;
+      while (parent) {
+        if (!next[parent]) {
+          next[parent] = true;
+          changed = true;
+        }
+        parent = data.pages.find((p) => p.id === parent)?.parentId || null;
+      }
+      return changed ? next : previous;
+    });
+  }, [active, data.pages]);
+  useEffect(() => {
+    // Keep the title as tall as its wrapped content instead of scrolling sideways.
+    const resize = () => {
+      const element = titleRef.current;
+      if (!element) return;
+      element.style.height = "auto";
+      element.style.height = element.scrollHeight + "px";
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [active, page?.title]);
+  useEffect(() => {
+    // A deleted home page should not leave the app stranded.
+    if (status === "saved" && !page && active === "home" && pages[0]) {
+      location.hash = "page=" + pages[0].id;
+      setActive(pages[0].id);
+    }
+  }, [status, page, active, pages]);
   useEffect(() => {
     const handler = () => {
       setActive(pageId());
       setSidebar(false);
-      scroll.current?.scrollTo({ top: 0 });
+      scroll.current?.scrollTo({ top: 0, behavior: "instant" });
     };
     window.addEventListener("hashchange", handler);
     const keys = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setSearch((v) => !v);
+        setSearch((open) => {
+          if (!open) setSearchIndex(0);
+          return !open;
+        });
       }
       if (
         (e.metaKey || e.ctrlKey) &&
@@ -229,7 +286,7 @@ function Workspace() {
       dbId = uid(),
       title =
         newTitle.trim() ||
-        (newKind === "database" ? "未命名数据库" : "未命名页面");
+        (newKind === "database" ? "未命名数据表格" : "未命名页面");
     const p: Page = {
       id,
       title,
@@ -326,8 +383,14 @@ function Workspace() {
     }
     mutate(ops);
     setNewOpen(false);
-    if (newParent) setExpanded({ ...expanded, [newParent]: true });
+    if (newParent)
+      setExpanded((previous) => ({ ...previous, [newParent]: true }));
     navigate(id);
+    // Let people start typing the title right away, like a fresh Notion page.
+    setTimeout(() => {
+      titleRef.current?.focus();
+      titleRef.current?.select();
+    }, 60);
   }
   function descendants(id: string): string[] {
     const result = [id];
@@ -430,18 +493,18 @@ function Workspace() {
     navigate(copy.id);
     toast("已创建独立副本");
   }
-  function reorderPage(target: Page) {
+  function reorderPage(target: Page, after = false) {
     const from = pages.find((p) => p.id === dragPage.current);
     if (!from || from.id === target.id) return;
+    if (descendants(from.id).includes(target.parentId || "")) return;
     const siblings = pages.filter(
       (p) => p.parentId === target.parentId && p.id !== from.id,
     );
     siblings.splice(
-      siblings.findIndex((p) => p.id === target.id),
+      siblings.findIndex((p) => p.id === target.id) + (after ? 1 : 0),
       0,
       { ...from, parentId: target.parentId },
     );
-    if (descendants(from.id).includes(target.parentId || "")) return;
     mutate(
       siblings.map((p, i) => ({
         entity: "pages",
@@ -452,12 +515,58 @@ function Workspace() {
     );
     dragPage.current = null;
   }
+  function renamePage(p: Page, rawTitle: string) {
+    const title = rawTitle.trim() || "未命名";
+    if (title === p.title) return;
+    const ops: Op[] = [
+      {
+        entity: "pages",
+        id: p.id,
+        action: "set",
+        data: { ...p, title, updatedAt: new Date().toISOString() },
+      },
+    ];
+    if (p.databaseId) {
+      const db = data.databases.find((d) => d.id === p.databaseId);
+      if (db)
+        ops.push({
+          entity: "databases",
+          id: db.id,
+          action: "set",
+          data: { ...db, name: title },
+        });
+    }
+    mutate(ops);
+  }
+  function startRename(p: Page) {
+    ignoreRenameBlur.current = true;
+    setRenaming({ id: p.id, value: p.title });
+    // Radix restores focus to the menu trigger after closing. Take focus back
+    // once that has happened, so inline rename works from the menu too.
+    setTimeout(() => {
+      const input = renameInput.current;
+      if (input) {
+        input.focus();
+        input.select();
+      }
+      ignoreRenameBlur.current = false;
+    }, 80);
+  }
   function pageMenu(p: Page) {
     return (
       <>
         <MenuItem onClick={() => navigate(p.id)}>
           <ArrowUpRight size={15} />
           打开页面
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            navigate(p.id);
+            startRename(p);
+          }}
+        >
+          <PenLine size={15} />
+          重命名
         </MenuItem>
         <MenuItem onClick={() => put("pages", { ...p, favorite: !p.favorite })}>
           <Star size={15} />
@@ -497,20 +606,56 @@ function Workspace() {
         return (
           <div key={p.id}>
             <div
-              className={"sidebar-page " + (active === p.id ? "active" : "")}
+              className={
+                "sidebar-page " +
+                (active === p.id ? "active " : "") +
+                (renaming?.id === p.id ? "renaming " : "") +
+                (pageDragOver?.id === p.id
+                  ? pageDragOver.after
+                    ? "drag-after"
+                    : "drag-before"
+                  : "")
+              }
               style={{ paddingLeft: 10 + depth * 14 }}
-              draggable
-              onDragStart={() => {
+              draggable={renaming?.id !== p.id}
+              onDragStart={(e) => {
                 dragPage.current = p.id;
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", p.id);
               }}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => reorderPage(p)}
+              onDragEnd={() => setPageDragOver(null)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                const rect = e.currentTarget.getBoundingClientRect();
+                setPageDragOver({
+                  id: p.id,
+                  after: e.clientY > rect.top + rect.height / 2,
+                });
+              }}
+              onDragLeave={(e) => {
+                if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+                  setPageDragOver((current) =>
+                    current?.id === p.id ? null : current,
+                  );
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                reorderPage(
+                  p,
+                  pageDragOver?.id === p.id ? pageDragOver.after : false,
+                );
+                setPageDragOver(null);
+              }}
             >
               <button
                 className={"tree-toggle " + (!children ? "no-children" : "")}
-                aria-label="展开子页面"
+                aria-label={expanded[p.id] ? "收起子页面" : "展开子页面"}
                 onClick={() =>
-                  setExpanded({ ...expanded, [p.id]: !expanded[p.id] })
+                  setExpanded((previous) => ({
+                    ...previous,
+                    [p.id]: !previous[p.id],
+                  }))
                 }
               >
                 {expanded[p.id] ? (
@@ -519,13 +664,53 @@ function Workspace() {
                   <ChevronRight size={12} />
                 )}
               </button>
-              <button
-                className="sidebar-page-main"
-                onClick={() => navigate(p.id)}
-              >
-                <span className="page-emoji">{p.icon}</span>
-                <span>{p.title || "未命名"}</span>
-              </button>
+              {renaming?.id === p.id ? (
+                <input
+                  ref={renameInput}
+                  className="sidebar-rename"
+                  autoFocus
+                  aria-label="页面名称"
+                  value={renaming.value}
+                  onChange={(e) =>
+                    setRenaming({ id: p.id, value: e.target.value })
+                  }
+                  onFocus={(e) => e.currentTarget.select()}
+                  onBlur={(e) => {
+                    if (ignoreRenameBlur.current) return;
+                    const next = e.relatedTarget as HTMLElement | null;
+                    if (next?.closest(".page-more")) {
+                      setTimeout(() => renameInput.current?.focus(), 0);
+                      return;
+                    }
+                    renamePage(p, renaming.value);
+                    setRenaming(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return;
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      ignoreRenameBlur.current = false;
+                      renamePage(p, renaming.value);
+                      setRenaming(null);
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      ignoreRenameBlur.current = false;
+                      setRenaming(null);
+                    }
+                  }}
+                />
+              ) : (
+                <button
+                  className="sidebar-page-main"
+                  aria-current={active === p.id ? "page" : undefined}
+                  onClick={() => navigate(p.id)}
+                  onDoubleClick={() => startRename(p)}
+                >
+                  <span className="page-emoji">{p.icon}</span>
+                  <span>{p.title || "未命名"}</span>
+                </button>
+              )}
               <Menu
                 trigger={
                   <button className="page-more" aria-label={p.title + "操作"}>
@@ -555,6 +740,31 @@ function Workspace() {
         ))
     );
   });
+  const recordTitle = (record: Entry) => {
+    const titleField = data.fields.find(
+      (f) => f.databaseId === record.databaseId && f.type === "title",
+    );
+    return String((titleField && record.values[titleField.id]) || "未命名");
+  };
+  const matchedRecords: Entry[] = query
+    ? data.records
+        .filter((record) => {
+          const owner = pages.find(
+            (p) => p.kind === "database" && p.databaseId === record.databaseId,
+          );
+          if (!owner) return false;
+          const text = [
+            recordTitle(record),
+            ...Object.values(record.values).map(String),
+            plainText(record.content),
+          ]
+            .join(" ")
+            .toLowerCase();
+          return text.includes(query.toLowerCase());
+        })
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+        .slice(0, 12)
+    : [];
   const parents: Page[] = [];
   if (page) {
     let id = page.parentId;
@@ -565,6 +775,41 @@ function Workspace() {
       id = p.parentId;
     }
   }
+  const searchItems: { key: string; page: Page; record?: Entry }[] = query
+    ? [
+        ...searchResults.map((page) => ({ key: "page-" + page.id, page })),
+        ...matchedRecords.flatMap((record) => {
+          const owner = pages.find(
+            (p) => p.kind === "database" && p.databaseId === record.databaseId,
+          );
+          return owner
+            ? [{ key: "record-" + record.id, page: owner, record }]
+            : [];
+        }),
+      ]
+    : recentMode
+      ? recent
+          .map((id) => pages.find((p) => p.id === id))
+          .filter((p): p is Page => !!p)
+          .map((page) => ({ key: "page-" + page.id, page }))
+      : [...pages]
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .map((page) => ({ key: "page-" + page.id, page }));
+  const openSearchResult = (item?: { page: Page; record?: Entry }) => {
+    if (!item) return;
+    setPendingRecord(item.record?.id || null);
+    navigate(item.page.id);
+    setSearch(false);
+  };
+  const activeSearchIndex = searchItems.length
+    ? Math.min(searchIndex, searchItems.length - 1)
+    : 0;
+  useEffect(() => {
+    if (!search) return;
+    document
+      .getElementById("search-result-" + activeSearchIndex)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [search, activeSearchIndex, query, recentMode]);
   const dateText = today.toLocaleDateString("zh-CN", {
       month: "long",
       day: "numeric",
@@ -590,7 +835,7 @@ function Workspace() {
       <div className="sidebar-backdrop" onClick={() => setSidebar(false)} />
       <aside className="sidebar">
         <div className="workspace-switch">
-          <button className="brand" onClick={() => navigate("home")}>
+          <button className="brand" onClick={goHome}>
             <span className="brand-mark">
               <BookOpen size={20} />
             </span>
@@ -621,6 +866,7 @@ function Workspace() {
             className="sidebar-search"
             onClick={() => {
               setQuery("");
+              setSearchIndex(0);
               setRecentMode(false);
               setSearch(true);
               setSidebar(false);
@@ -630,7 +876,7 @@ function Workspace() {
             <span>搜索所有内容</span>
             <kbd>⌘ K</kbd>
           </button>
-          <button className="sidebar-nav-link" onClick={() => navigate("home")}>
+          <button className="sidebar-nav-link" onClick={goHome}>
             <Home size={17} />
             <span>工作台</span>
           </button>
@@ -638,8 +884,10 @@ function Workspace() {
             className="sidebar-nav-link"
             onClick={() => {
               setQuery("");
+              setSearchIndex(0);
               setRecentMode(true);
               setSearch(true);
+              setSidebar(false);
             }}
           >
             <Clock size={17} />
@@ -657,6 +905,7 @@ function Workspace() {
                     "favorite-page " + (active === p.id ? "active" : "")
                   }
                   key={p.id}
+                  aria-current={active === p.id ? "page" : undefined}
                   onClick={() => navigate(p.id)}
                 >
                   <span>{p.icon}</span>
@@ -728,7 +977,9 @@ function Workspace() {
               <PanelLeft size={19} />
             </button>
             <div className="breadcrumbs">
-              <span className="breadcrumb-root">个人空间</span>
+              <button className="breadcrumb-root" onClick={goHome}>
+                个人空间
+              </button>
               {parents.map((p) => (
                 <span key={p.id}>
                   <ChevronRight size={12} />
@@ -842,7 +1093,25 @@ function Workspace() {
             )}
           </div>
         )}
-        <main className="main-scroll" ref={scroll}>
+        <main
+          className="main-scroll"
+          ref={scroll}
+          onClick={(e) => {
+            if (!page || page.kind === "database") return;
+            const target = e.target as HTMLElement;
+            // Portaled menus keep bubbling through the React tree, so only
+            // treat clicks on the page surface (not its dropdowns) as blank.
+            if (target !== e.currentTarget && !target.closest(".page-content"))
+              return;
+            if (
+              target.closest(
+                "button, a, input, textarea, select, label, [contenteditable='true'], [role='menu'], [role='menuitem'], [role='dialog'], .block-editor, .editor-shell, .database-grid, .page-card, .quick-actions, .child-pages, .page-cover, .page-toolbar, .dropdown, .modal, .option-picker, .date-popover, .slash-menu",
+              )
+            )
+              return;
+            window.dispatchEvent(new Event("focus-page-editor"));
+          }}
+        >
           {status === "loading" ? (
             <div className="loading-state">
               <span className="brand-mark">
@@ -930,11 +1199,13 @@ function Workspace() {
                         </button>
                       )}
                       <span>
-                        {page.kind === "database" ? "数据库" : "个人笔记"}
+                        {page.kind === "database" ? "数据表格" : "个人笔记"}
                       </span>
                     </div>
                   </div>
-                  <input
+                  <textarea
+                    ref={titleRef}
+                    rows={1}
                     className="page-title"
                     aria-label="页面标题"
                     value={page.title}
@@ -967,11 +1238,30 @@ function Workspace() {
                       }
                       mutate(ops);
                     }}
+                    onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return;
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        window.dispatchEvent(new Event("focus-page-editor"));
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                      }
+                      if (
+                        e.key === "ArrowDown" &&
+                        !e.shiftKey &&
+                        e.currentTarget.selectionStart === page.title.length
+                      ) {
+                        e.preventDefault();
+                        window.dispatchEvent(new Event("focus-page-editor"));
+                      }
+                    }}
                   />
                   {page.kind === "database" ? (
                     <input
                       className="page-description"
-                      aria-label="数据库描述"
+                      aria-label="数据表格描述"
                       placeholder="添加描述…"
                       value={
                         data.databases.find((d) => d.id === page.databaseId)
@@ -1113,7 +1403,12 @@ function Workspace() {
                   </>
                 )}
                 {page.kind === "database" ? (
-                  <DatabaseGrid key={page.id} databaseId={page.databaseId!} />
+                  <DatabaseGrid
+                    key={page.id}
+                    databaseId={page.databaseId!}
+                    openRecordId={pendingRecord}
+                    onOpenRecordHandled={() => setPendingRecord(null)}
+                  />
                 ) : (
                   <Editor
                     key={page.id}
@@ -1146,7 +1441,10 @@ function Workspace() {
       </div>
       <Modal
         open={search}
-        onOpenChange={setSearch}
+        onOpenChange={(open) => {
+          setSearch(open);
+          if (open) setSearchIndex(0);
+        }}
         title="搜索工作空间"
         className="search-modal"
       >
@@ -1154,61 +1452,105 @@ function Workspace() {
           <Search size={20} />
           <input
             autoFocus
-            placeholder="搜索页面、笔记或数据库记录…"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="global-search-results"
+            aria-autocomplete="list"
+            aria-activedescendant={
+              searchItems.length
+                ? "search-result-" + activeSearchIndex
+                : undefined
+            }
+            placeholder="搜索页面、笔记或数据表格记录…"
             aria-label="全局搜索"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setSearchIndex(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                if (!searchItems.length) return;
+                const step = e.key === "ArrowDown" ? 1 : -1;
+                setSearchIndex(
+                  (activeSearchIndex + step + searchItems.length) %
+                    searchItems.length,
+                );
+              }
+              if (e.key === "Enter" && searchItems[activeSearchIndex]) {
+                e.preventDefault();
+                openSearchResult(searchItems[activeSearchIndex]);
+              }
+            }}
           />
           <kbd>ESC</kbd>
         </div>
-        <div className="search-results">
+        <div
+          className="search-results"
+          id="global-search-results"
+          role="listbox"
+          aria-label="搜索结果"
+        >
           <div className="menu-label">
             {query
-              ? `找到 ${searchResults.length} 个页面`
+              ? `找到 ${searchItems.length} 个结果`
               : recentMode
                 ? "最近访问"
                 : "最近更新"}
           </div>
-          {(query
-            ? searchResults
-            : recentMode
-              ? recent
-                  .map((id) => pages.find((p) => p.id === id))
-                  .filter((p): p is Page => !!p)
-              : [...pages].sort((a, b) =>
-                  b.updatedAt.localeCompare(a.updatedAt),
-                )
-          ).map((p) => (
+          {searchItems.map((item, index) => (
             <button
-              key={p.id}
-              onClick={() => {
-                navigate(p.id);
-                setSearch(false);
-              }}
+              key={item.key}
+              id={"search-result-" + index}
+              role="option"
+              aria-selected={index === activeSearchIndex}
+              className={index === activeSearchIndex ? "selected" : ""}
+              onMouseEnter={() => setSearchIndex(index)}
+              onClick={() => openSearchResult(item)}
             >
-              <span className="search-result-icon">{p.icon}</span>
+              <span className="search-result-icon">
+                {item.record ? "▤" : item.page.icon}
+              </span>
               <span>
-                <strong>{p.title || "未命名"}</strong>
+                <strong>
+                  {item.record
+                    ? recordTitle(item.record)
+                    : item.page.title || "未命名"}
+                </strong>
                 <small>
-                  {p.kind === "database"
-                    ? "数据库 · " +
-                      data.records.filter((r) => r.databaseId === p.databaseId)
-                        .length +
-                      " 条记录"
-                    : plainText(p.content).slice(0, 80) || "空白页面"}
+                  {item.record
+                    ? item.page.title + " · 数据表格记录"
+                    : item.page.kind === "database"
+                      ? "数据表格 · " +
+                        data.records.filter(
+                          (r) => r.databaseId === item.page.databaseId,
+                        ).length +
+                        " 条记录"
+                      : plainText(item.page.content).slice(0, 80) || "空白页面"}
                 </small>
               </span>
               <ArrowUpRight size={15} />
             </button>
           ))}
-          {!searchResults.length && (
+          {!searchItems.length && (
             <div className="empty-state">
               <Search size={24} />
-              <p>没有找到相关内容，换个词试试。</p>
+              <p>
+                {query
+                  ? "没有找到相关内容，换个词试试。"
+                  : recentMode
+                    ? "还没有最近访问的页面。"
+                    : "工作空间里还没有页面。"}
+              </p>
             </div>
           )}
         </div>
-        <div className="search-footer">搜索页面标题、正文及数据库中的内容</div>
+        <div className="search-footer">
+          <span>↑ ↓ 选择 · ↵ 打开 · ESC 关闭</span>
+          <span>搜索页面标题、正文及数据表格中的内容</span>
+        </div>
       </Modal>
       <Modal
         open={newOpen}
@@ -1238,12 +1580,12 @@ function Workspace() {
               onClick={() => setNewKind("database")}
             >
               <Table2 size={22} />
-              <strong>数据库</strong>
+              <strong>数据表格</strong>
               <span>结构化整理与计算</span>
             </button>
           </div>
           <label className="form-label">
-            {newKind === "page" ? "页面" : "数据库"}名称
+            {newKind === "page" ? "页面" : "数据表格"}名称
             <input
               autoFocus
               placeholder={
@@ -1262,7 +1604,7 @@ function Workspace() {
                 value={template}
                 onChange={(e) => setTemplate(e.target.value)}
               >
-                <option value="blank">空白数据库 · 自定义属性</option>
+                <option value="blank">空白数据表格 · 自定义属性</option>
                 <option value="tasks">项目任务 · 状态、日期、优先级</option>
                 <option value="budget">预算账本 · 数量 × 单价、金额合计</option>
                 <option value="reading">
@@ -1295,7 +1637,7 @@ function Workspace() {
             </button>
             <button className="button primary">
               <Plus size={15} />
-              创建{newKind === "page" ? "页面" : "数据库"}
+              创建{newKind === "page" ? "页面" : "数据表格"}
             </button>
           </div>
         </form>
@@ -1443,7 +1785,7 @@ function Workspace() {
         open={!!permanent}
         onOpenChange={(v) => !v && setPermanent(null)}
         title="永久删除页面？"
-        description="页面、子页面及其数据库记录会永久删除，引用这些数据库的嵌入块也将无法使用。此操作无法撤销。"
+        description="页面、子页面及其数据表格记录会永久删除，引用这些数据表格的嵌入块也将无法使用。此操作无法撤销。"
         onConfirm={() => {
           if (!permanent) return;
           const ids = descendants(permanent.id),
@@ -1495,7 +1837,7 @@ function Workspace() {
             </div>
             <div>
               <strong>{data.databases.length}</strong>
-              <span>数据库</span>
+              <span>数据表格</span>
             </div>
             <div>
               <strong>{data.records.length}</strong>

@@ -1,0 +1,22 @@
+[Unit]
+Description=NotionX personal workspace
+After=network.target
+
+[Service]
+Type=simple
+User=notionx
+Group=notionx
+WorkingDirectory=/opt/notionx/current
+EnvironmentFile=/etc/notionx/notionx.env
+ExecStart=/opt/notionx/runtime/node server/index.js
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/notionx
+
+[Install]
+WantedBy=multi-user.target

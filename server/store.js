@@ -116,11 +116,11 @@ export function validate(data) {
       parent = data.pages.find((x) => x.id === parent)?.parentId;
     }
     if (p.kind === "database" && !databaseIds.has(p.databaseId))
-      throw new Error("页面数据库不存在");
+      throw new Error("页面数据表格不存在");
   }
   for (const t of ["fields", "records", "views"])
     for (const item of data[t]) {
-      if (!databaseIds.has(item.databaseId)) throw new Error("数据库不存在");
+      if (!databaseIds.has(item.databaseId)) throw new Error("数据表格不存在");
       if (
         t === "fields" &&
         (![
@@ -205,9 +205,9 @@ export function validate(data) {
   for (const d of data.databases) {
     const fields = data.fields.filter((f) => f.databaseId === d.id);
     if (fields.filter((f) => f.type === "title").length !== 1)
-      throw new Error("每个数据库必须有且仅有一个标题属性");
+      throw new Error("每个数据表格必须有且仅有一个标题属性");
     if (new Set(fields.map((f) => f.name)).size !== fields.length)
-      throw new Error("同一数据库中的属性名称不能重复");
+      throw new Error("同一数据表格中的属性名称不能重复");
   }
 }
 function validateDoc(doc) {

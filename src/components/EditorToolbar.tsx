@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import type { ReactNode } from "react";
 import type { Editor } from "@tiptap/core";
-import { NodeSelection } from "@tiptap/pm/state";
+import { TextSelection } from "@tiptap/pm/state";
 import {
   autoUpdate,
   flip,
@@ -13,12 +13,10 @@ import {
 
 export function EditorToolbar({
   editor,
-  menuOpen,
   suppressed,
   children,
 }: {
   editor: Editor;
-  menuOpen: boolean;
   suppressed: boolean;
   children: ReactNode;
 }) {
@@ -42,29 +40,26 @@ export function EditorToolbar({
     whileElementsMounted: autoUpdate,
   });
   useLayoutEffect(() => {
-    // Read the live ProseMirror selection on every positioning update. The
-    // caret's line is the vertical anchor, so long blocks also stay usable.
+    // Anchor the toolbar above the selected text, never above the caret.
     refs.setReference({
       contextElement: editor.view.dom,
       getBoundingClientRect() {
         if (editor.isDestroyed) return new DOMRect();
         const selection = editor.state.selection;
-        if (selection instanceof NodeSelection) {
-          const node = editor.view.nodeDOM(selection.from);
-          if (node instanceof HTMLElement) return node.getBoundingClientRect();
-        }
-        const { $head, head } = selection;
-        const node = $head.depth
-          ? editor.view.nodeDOM($head.before($head.depth))
-          : editor.view.dom;
-        const block = node instanceof HTMLElement ? node : editor.view.dom;
-        const bounds = block.getBoundingClientRect();
-        const caret = editor.view.coordsAtPos(head);
+        if (!(selection instanceof TextSelection) || selection.empty)
+          return new DOMRect();
+        const from = editor.view.coordsAtPos(selection.from);
+        const to = editor.view.coordsAtPos(selection.to);
         return new DOMRect(
-          bounds.left,
-          caret.top,
-          bounds.width,
-          caret.bottom - caret.top,
+          from.left,
+          from.top,
+          Math.max(
+            1,
+            selection.$from.sameParent(selection.$to)
+              ? to.right - from.left
+              : editor.view.dom.getBoundingClientRect().right - from.left,
+          ),
+          Math.max(1, from.bottom - from.top),
         );
       },
     });
@@ -105,9 +100,13 @@ export function EditorToolbar({
   }, [editor, refs]);
   useEffect(() => {
     update();
-  }, [hasFocus, menuOpen, suppressed, update]);
+  }, [hasFocus, suppressed, update]);
+  const selection = editor.state.selection;
+  const hasTextSelection =
+    selection instanceof TextSelection && !selection.empty;
   const visible =
-    (hasFocus || menuOpen) &&
+    hasTextSelection &&
+    hasFocus &&
     !suppressed &&
     isPositioned &&
     !middlewareData.hide?.referenceHidden;

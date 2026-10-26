@@ -3,7 +3,7 @@ type Placement = { target: string; after: boolean };
 
 // Keep framework-owned DOM in place. Only temporary styles change until drop.
 // A styled DOM snapshot preserves rich blocks, controls and typed table values.
-function snapshot(element: HTMLElement) {
+export function snapshot(element: HTMLElement) {
   const copy = element.cloneNode(true) as HTMLElement;
   const originals = [element, ...element.querySelectorAll<HTMLElement>("*")];
   const copies = [copy, ...copy.querySelectorAll<HTMLElement>("*")];
@@ -78,15 +78,23 @@ export function sortableDrag(
       items: { id: string; offset: number; source: boolean }[] | null,
     ) => void;
     onStart?: () => void;
-    onFinish: (placement: Placement | null) => void;
+    onGeometryChange?: () => void;
+    onMove?: (
+      x: number,
+      y: number,
+    ) => { left: number; top: number; width: number; label?: string } | null;
+    onFinish: (placement: Placement | null, cancelled?: boolean) => void;
   },
 ) {
-  if (event.button !== 0 || options.items.length < 2) return () => {};
+  if (event.button !== 0 || (options.items.length < 2 && !options.onMove))
+    return () => {};
   event.preventDefault();
   const sourceIndex = options.items.findIndex(
     (item) => item.id === options.source,
   );
   if (sourceIndex < 0) return () => {};
+  const pointerId = event.pointerId;
+  const capture = document.body;
   const horizontal = options.axis === "x";
   const source = options.items[sourceIndex];
   let x = event.clientX,
@@ -98,9 +106,15 @@ export function sortableDrag(
     frame = 0,
     destination = sourceIndex;
   let overlay: HTMLDivElement | undefined;
+  let guide: HTMLDivElement | undefined;
   let initial = bounds(source.elements);
   let rects = options.items.map((item) => bounds(item.elements));
   let lastDestination = -1;
+  let geometryDirty = false;
+  const viewport = window.visualViewport;
+  const invalidateGeometry = () => {
+    geometryDirty = true;
+  };
   let scrollPositions: { el: HTMLElement; x: number; y: number }[] = [];
   const originals = new Map<HTMLElement, string | null>();
   const scrollStyles = new Map<HTMLElement, string>();
@@ -115,6 +129,25 @@ export function sortableDrag(
   };
   const draw = () => {
     if (!overlay) return;
+    if (geometryDirty) {
+      geometryDirty = false;
+      options.applyTransforms?.(null);
+      if (!options.applyTransforms)
+        options.items.forEach((item) =>
+          item.elements.forEach((el) => {
+            el.style.transform = "none";
+          }),
+        );
+      initial = bounds(source.elements);
+      rects = options.items.map((item) => bounds(item.elements));
+      scrollPositions = options.scroll.map((el) => ({
+        el,
+        x: el.scrollLeft,
+        y: el.scrollTop,
+      }));
+      options.onGeometryChange?.();
+      lastDestination = -1;
+    }
     overlay.style.transform = `translate3d(${x - startX}px, ${y - startY}px, 0)`;
     const scrolled = scrollPositions.reduce(
       (delta, s) => ({
@@ -133,15 +166,42 @@ export function sortableDrag(
       ({ r }) => pointer < start(r) + size(r) / 2,
     );
     destination = insertion < 0 ? remaining.length : insertion;
+    const external = options.onMove?.(x, y);
+    if (guide) {
+      const target = rects[destination];
+      const after = destination > sourceIndex;
+      Object.assign(
+        guide.style,
+        horizontal
+          ? {
+              left:
+                target.left + (after ? target.width : 0) - scrolled.x + "px",
+              top: initial.top - scrolled.y + "px",
+              width: "3px",
+              height: Math.min(initial.height, window.innerHeight - 16) + "px",
+            }
+          : {
+              left: (external?.left ?? target.left - scrolled.x) + "px",
+              top:
+                (external?.top ??
+                  target.top + (after ? target.height : 0) - scrolled.y) + "px",
+              width: (external?.width ?? target.width) + "px",
+              height: "3px",
+            },
+      );
+      guide.dataset.label = external?.label || "";
+    }
     if (destination === lastDestination) return;
     lastDestination = destination;
     const transforms: { id: string; offset: number; source: boolean }[] = [];
     const gap =
-      sourceIndex < rects.length - 1
-        ? start(rects[sourceIndex + 1]) - start(initial) - size(initial)
-        : start(initial) -
-          start(rects[sourceIndex - 1]) -
-          size(rects[sourceIndex - 1]);
+      options.items.length < 2
+        ? 0
+        : sourceIndex < rects.length - 1
+          ? start(rects[sourceIndex + 1]) - start(initial) - size(initial)
+          : start(initial) -
+            start(rects[sourceIndex - 1]) -
+            size(rects[sourceIndex - 1]);
     const stride = size(initial) + Math.max(0, gap);
     options.items.forEach((item, i) => {
       let offset = 0;
@@ -168,19 +228,29 @@ export function sortableDrag(
       const r = el.getBoundingClientRect();
       if (horizontal && el.scrollWidth > el.clientWidth)
         el.scrollLeft += x < r.left + 48 ? -14 : x > r.right - 48 ? 14 : 0;
-      if (!horizontal && el.scrollHeight > el.clientHeight)
-        el.scrollTop += y < r.top + 56 ? -12 : y > r.bottom - 56 ? 12 : 0;
+      if (!horizontal && el.scrollHeight > el.clientHeight) {
+        const visibleTop = Math.max(r.top, viewport?.offsetTop || 0);
+        const visibleBottom = Math.min(
+          r.bottom,
+          viewport ? viewport.offsetTop + viewport.height : window.innerHeight,
+        );
+        el.scrollTop +=
+          y < visibleTop + 56 ? -12 : y > visibleBottom - 56 ? 12 : 0;
+      }
     }
     draw();
     frame = requestAnimationFrame(tick);
   };
   const move = (e: PointerEvent) => {
+    if (e.pointerId !== pointerId) return;
     x = e.clientX;
     y = e.clientY;
     if (!started && Math.hypot(x - startX, y - startY) < 5) return;
     e.preventDefault();
     if (!started) {
       started = true;
+      if (event.pointerType === "touch") capture.setPointerCapture(pointerId);
+      options.onStart?.();
       initial = bounds(source.elements);
       rects = options.items.map((item) => bounds(item.elements));
       options.scroll.forEach((el) => {
@@ -278,6 +348,10 @@ export function sortableDrag(
         }
       }
       document.body.appendChild(overlay);
+      guide = document.createElement("div");
+      guide.className = "drag-insertion-guide";
+      guide.setAttribute("aria-hidden", "true");
+      document.body.appendChild(guide);
       if (!options.applyTransforms)
         options.items.forEach((item) =>
           item.elements.forEach((el) => {
@@ -287,7 +361,6 @@ export function sortableDrag(
           }),
         );
       document.body.classList.add("sorting-content");
-      options.onStart?.();
       frame = requestAnimationFrame(tick);
     }
     draw();
@@ -300,7 +373,12 @@ export function sortableDrag(
     document.removeEventListener("pointercancel", cancelDrag);
     document.removeEventListener("keydown", key, true);
     window.removeEventListener("blur", cancelDrag);
+    viewport?.removeEventListener("resize", invalidateGeometry);
+    viewport?.removeEventListener("scroll", invalidateGeometry);
+    if (capture.hasPointerCapture(pointerId))
+      capture.releasePointerCapture(pointerId);
     cancelAnimationFrame(frame);
+    guide?.remove();
     if (
       overlay &&
       started &&
@@ -356,10 +434,14 @@ export function sortableDrag(
         target: options.items[destination].id,
         after: destination > sourceIndex,
       };
-    options.onFinish(placement);
+    options.onFinish(placement, cancel);
   };
-  const up = () => finish(false);
-  const cancelDrag = () => finish(true);
+  const up = (e: PointerEvent) => {
+    if (e.pointerId === pointerId) finish(false);
+  };
+  const cancelDrag = (e?: Event) => {
+    if (!(e instanceof PointerEvent) || e.pointerId === pointerId) finish(true);
+  };
   const key = (e: KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();
@@ -372,5 +454,7 @@ export function sortableDrag(
   document.addEventListener("pointercancel", cancelDrag);
   document.addEventListener("keydown", key, true);
   window.addEventListener("blur", cancelDrag);
-  return cancelDrag;
+  viewport?.addEventListener("resize", invalidateGeometry);
+  viewport?.addEventListener("scroll", invalidateGeometry);
+  return () => finish(true);
 }
