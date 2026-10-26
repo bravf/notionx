@@ -34,4 +34,6 @@ if (process.env.NODE_ENV === "production") {
 }
 const port = Number(process.env.PORT || 5173);
 const host = process.env.HOST || "0.0.0.0";
-app.listen(port, host, () => console.log(`拾页 ready: http://${host}:${port}`));
+app.listen(port, host, () =>
+  console.log(`NotionX ready: http://${host}:${port}`),
+);

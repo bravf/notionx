@@ -83,7 +83,7 @@ test("admin creates invitation; user registers, edits private space, signs out a
       .getByRole("button", { name: "退出登录", exact: true })
       .click();
     await expect(
-      memberPage.getByRole("heading", { name: "欢迎回到拾页" }),
+      memberPage.getByRole("heading", { name: "欢迎回到NotionX" }),
     ).toBeVisible();
     await login(memberPage, name, password);
     await saved(memberPage);
@@ -127,7 +127,7 @@ test("reset requires password change; disable revokes login; stale browser tab c
     const temporary = (await reset.json()).temporaryPassword;
     await first.reload();
     await expect(
-      first.getByRole("heading", { name: "欢迎回到拾页" }),
+      first.getByRole("heading", { name: "欢迎回到NotionX" }),
     ).toBeVisible();
     await login(first, name, temporary);
     await expect(
@@ -163,7 +163,7 @@ test("reset requires password change; disable revokes login; stale browser tab c
     });
     await second.reload();
     await expect(
-      second.getByRole("heading", { name: "欢迎回到拾页" }),
+      second.getByRole("heading", { name: "欢迎回到NotionX" }),
     ).toBeVisible();
     await login(second, other, password);
     await expect(second.getByRole("alert")).toContainText("账号已停用");

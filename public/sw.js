@@ -23,7 +23,7 @@ self.addEventListener("fetch", (event) => {
           caches.match("/").then(
             (r) =>
               r ||
-              new Response("连接已断开，请联网后重新打开拾页。", {
+              new Response("连接已断开，请联网后重新打开NotionX。", {
                 headers: { "Content-Type": "text/plain;charset=utf-8" },
               }),
           ),

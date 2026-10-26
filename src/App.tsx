@@ -245,7 +245,7 @@ function Workspace() {
     };
   }, []);
   useEffect(() => {
-    if (page) document.title = page.title + " · 拾页";
+    if (page) document.title = page.title + " · NotionX";
   }, [page?.title]);
   useEffect(() => {
     if (!page) return;
@@ -848,7 +848,7 @@ function Workspace() {
               <BookOpen size={20} />
             </span>
             <span>
-              拾页<span className="brand-sub">我的个人空间</span>
+              NotionX<span className="brand-sub">我的个人空间</span>
             </span>
           </button>
           <button
@@ -1928,7 +1928,7 @@ function Workspace() {
                   const r = await request("/api/backup");
                   if (!r.ok) throw new Error("导出失败");
                   download(
-                    "拾页备份-" +
+                    "NotionX备份-" +
                       new Date().toISOString().slice(0, 10) +
                       ".json",
                     JSON.stringify(await r.json(), null, 2),
@@ -1972,7 +1972,7 @@ function Workspace() {
                   !Array.isArray(parsed.pages) ||
                   !Array.isArray(parsed.records)
                 )
-                  throw new Error("这不是有效的拾页备份文件");
+                  throw new Error("这不是有效的NotionX备份文件");
                 setRestoreData(parsed);
                 setRestoreConfirm(true);
               } catch (err) {
@@ -1996,7 +1996,7 @@ function Workspace() {
           <span className="brand-mark">
             <BookOpen size={15} />
           </span>
-          <strong>拾页</strong>
+          <strong>NotionX</strong>
           <span>让想法有处安放。 · v1.0</span>
         </div>
       </Modal>

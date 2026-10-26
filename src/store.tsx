@@ -365,7 +365,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         toast,
         exportLocal: () =>
           download(
-            "拾页-本机内容.json",
+            "NotionX-本机内容.json",
             JSON.stringify({ schemaVersion: 1, ...ref.current }, null, 2),
           ),
       }}
@@ -395,7 +395,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           <button
             className="button primary"
             onClick={() => {
-              if (recovery) download("拾页-未保存内容.json", recovery);
+              if (recovery) download("NotionX-未保存内容.json", recovery);
               setRecovery(null);
             }}
           >

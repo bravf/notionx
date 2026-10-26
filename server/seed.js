@@ -160,7 +160,7 @@ export function seed() {
       content: {
         type: "doc",
         content: [
-          h("欢迎来到拾页"),
+          h("欢迎来到NotionX"),
           p(
             "这是你的个人工作空间。写笔记、规划项目，或用数据表格整理生活，一切都从一张页面开始。",
           ),
