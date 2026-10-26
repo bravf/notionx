@@ -225,9 +225,9 @@ function AuthScreen({
             name="password"
             type="password"
             autoComplete={register ? "new-password" : "current-password"}
-            placeholder={register ? "至少 12 个字符" : "输入密码"}
+            placeholder={register ? "至少 8 个字符" : "输入密码"}
             required
-            minLength={register ? 12 : 1}
+            minLength={register ? 8 : 1}
             maxLength={128}
           />
         </label>
@@ -240,7 +240,7 @@ function AuthScreen({
               autoComplete="new-password"
               placeholder="再次输入密码"
               required
-              minLength={12}
+              minLength={8}
               maxLength={128}
             />
           </label>
@@ -339,9 +339,9 @@ export function PasswordForm({
           type="password"
           autoComplete="new-password"
           required
-          minLength={12}
+          minLength={8}
           maxLength={128}
-          placeholder="12–128 个字符"
+          placeholder="8–128 个字符"
         />
       </label>
       <label>
@@ -351,7 +351,7 @@ export function PasswordForm({
           type="password"
           autoComplete="new-password"
           required
-          minLength={12}
+          minLength={8}
           maxLength={128}
         />
       </label>

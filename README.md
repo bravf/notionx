@@ -10,7 +10,7 @@
 
 ```sh
 npm install
-ADMIN_PASSWORD='请替换为至少12个字符的初始密码' npm run dev
+ADMIN_PASSWORD='请替换为至少8个字符的初始密码' npm run dev
 ```
 
 默认地址为 `http://localhost:5173`。开发服务绑定 `0.0.0.0`，手机与电脑处在同一局域网时，使用 `http://电脑的局域网IP:5173` 访问。手机的 localhost 指向手机自己。系统防火墙需要允许访问此端口。
@@ -19,7 +19,7 @@ ADMIN_PASSWORD='请替换为至少12个字符的初始密码' npm run dev
 
 ```sh
 npm run build
-ADMIN_PASSWORD='请替换为至少12个字符的初始密码' npm start
+ADMIN_PASSWORD='请替换为至少8个字符的初始密码' npm start
 ```
 
 长期部署建议使用 HTTPS 反向代理。HTTPS 下设置 `COOKIE_SECURE=true`。PWA 安装和 Service Worker 需要安全上下文，手机普通局域网 HTTP 可直接浏览使用，无法保证可安装为 PWA。
@@ -52,16 +52,16 @@ SUM({收入}, -{支出})
 
 ## 数据与部署配置
 
-| 环境变量         | 默认值                | 用途                                   |
-| ---------------- | --------------------- | -------------------------------------- |
-| `HOST`           | `0.0.0.0`             | 监听地址；线上设为 127.0.0.1           |
-| `PORT`           | `5173`                | HTTP 端口                              |
-| `DATABASE_PATH`  | `data/notionx.sqlite` | SQLite 数据文件                        |
-| `ADMIN_USERNAME` | admin                 | 首次初始化管理员用户名                 |
-| `ADMIN_PASSWORD` | 未设置                | 首次初始化管理员临时密码，至少 12 字符 |
-| `APP_PASSWORD`   | 未设置                | 兼容旧版，仅首次初始化管理员           |
-| `COOKIE_SECURE`  | `false`               | HTTPS 部署设为 `true`                  |
-| `NODE_ENV`       | 开发模式              | `production` 使用已构建的静态文件      |
+| 环境变量         | 默认值                | 用途                                  |
+| ---------------- | --------------------- | ------------------------------------- |
+| `HOST`           | `0.0.0.0`             | 监听地址；线上设为 127.0.0.1          |
+| `PORT`           | `5173`                | HTTP 端口                             |
+| `DATABASE_PATH`  | `data/notionx.sqlite` | SQLite 数据文件                       |
+| `ADMIN_USERNAME` | admin                 | 首次初始化管理员用户名                |
+| `ADMIN_PASSWORD` | 未设置                | 首次初始化管理员临时密码，至少 8 字符 |
+| `APP_PASSWORD`   | 未设置                | 兼容旧版，仅首次初始化管理员          |
+| `COOKIE_SECURE`  | `false`               | HTTPS 部署设为 `true`                 |
+| `NODE_ENV`       | 开发模式              | `production` 使用已构建的静态文件     |
 
 SQLite 启用 WAL 和事务，页面、数据表格、属性、记录、视图分别存表，动态内容使用 JSON 保存。普通编辑只更新变更实体，完整恢复在事务中替换。数据库结构版本为 2，旧版启动时事务迁移。所有实体及版本号按空间隔离，用户 JSON 备份仍使用版本 1，可继续导入。
 

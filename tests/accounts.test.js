@@ -5,11 +5,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createStore, entities } from "../server/store.js";
-import { createAccounts } from "../server/accounts.js";
+import { createAccounts, validatePassword } from "../server/accounts.js";
 import { createApi } from "../server/app.js";
 import { seed } from "../server/seed.js";
-const originalPassword = "bootstrap-password-123";
-const password = "private-password-123";
+const originalPassword = "start123";
+const password = "test1234";
+test("password length accepts 8 through 128 characters", () => {
+  assert.throws(() => validatePassword("1234567"), /8/);
+  assert.equal(validatePassword("12345678"), "12345678");
+  assert.equal(validatePassword("a".repeat(128)).length, 128);
+  assert.throws(() => validatePassword("a".repeat(129)), /128/);
+});
 async function setup(path = ":memory:") {
   const store = createStore(path);
   const accounts = await createAccounts(store, {
@@ -86,7 +92,7 @@ test("one-use invitations, expiry, revocation, closed registration, validation a
         password: "123",
         inviteCode: invite.code,
       }),
-      /12/,
+      /8/,
     );
     assert.equal(accounts.invitations()[0].usedBy, null);
     const results = await Promise.allSettled(

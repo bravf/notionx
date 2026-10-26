@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
 import type { APIRequestContext, BrowserContext, Page } from "@playwright/test";
-const password = "browser-private-password-123";
+const password = "test1234";
 async function owner(request: APIRequestContext) {
   const response = await request.post("/api/session", {
     data: {

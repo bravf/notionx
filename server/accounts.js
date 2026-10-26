@@ -13,8 +13,8 @@ const fail = (message, status = 400) => {
   throw Object.assign(new Error(message), { status });
 };
 export function validatePassword(value) {
-  if (typeof value !== "string" || value.length < 12 || value.length > 128)
-    fail("密码需要 12–128 个字符");
+  if (typeof value !== "string" || value.length < 8 || value.length > 128)
+    fail("密码需要 8–128 个字符");
   return value;
 }
 function username(value) {

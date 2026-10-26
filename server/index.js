@@ -16,7 +16,7 @@ const { app, accounts } = await createApi(store, {
 });
 if (!accounts.initialized())
   console.error(
-    "尚未初始化管理员：请设置 ADMIN_PASSWORD（至少 12 位）后重启；已有 APP_PASSWORD 可用于首次迁移。",
+    "尚未初始化管理员：请设置 ADMIN_PASSWORD（至少 8 位）后重启；已有 APP_PASSWORD 可用于首次迁移。",
   );
 if (process.env.NODE_ENV === "production") {
   app.use(express.static(resolve(root, "dist")));
