@@ -688,6 +688,169 @@ test("touching a numeric cell opens its editor without opening the keyboard", as
   }
 });
 
+test("touch dropdowns wait for click and cancelled presses do not open menus", async ({
+  browser,
+  request,
+}) => {
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    serviceWorkers: "block",
+    storageState: await request.storageState(),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("/#page=" + fixture.dbPage.id);
+    const triggers = [
+      page.getByRole("button", { name: "数量汇总", exact: true }),
+      page.locator(
+        `th[data-field-id="${fixture.fields[1].id}"] .column-heading > button`,
+      ),
+      page.getByRole("button", { name: "视图操作", exact: true }),
+      page.getByRole("button", { name: "分组", exact: true }),
+      page.getByRole("button", { name: "属性", exact: true }),
+    ];
+    for (const trigger of triggers) {
+      await trigger.scrollIntoViewIfNeeded();
+      await trigger.dispatchEvent("pointerdown", {
+        pointerId: 1,
+        pointerType: "touch",
+        button: 0,
+        isPrimary: true,
+      });
+      await expect(trigger).toHaveAttribute("aria-expanded", "false");
+      await trigger.dispatchEvent("pointercancel", {
+        pointerId: 1,
+        pointerType: "touch",
+        isPrimary: true,
+      });
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await trigger.tap();
+      await expect(page.getByRole("menu")).toBeVisible();
+      await page.keyboard.press("Escape");
+      await expect(page.getByRole("menu")).toHaveCount(0);
+    }
+    await triggers[0].tap();
+    await page.getByRole("menuitem", { name: "平均值", exact: true }).tap();
+    await saved(page);
+    expect(
+      (await snapshot(request)).fields.find(
+        (f: any) => f.id === fixture.fields[1].id,
+      ).summary,
+    ).toBe("average");
+    await triggers[0].focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "展开导航", exact: true }).tap();
+    const pageMenu = page.locator(".sidebar-page.active").getByRole("button", {
+      name: "验证账本操作",
+      exact: true,
+    });
+    await pageMenu.dispatchEvent("pointerdown", {
+      pointerId: 2,
+      pointerType: "touch",
+      button: 0,
+      isPrimary: true,
+    });
+    await expect(pageMenu).toHaveAttribute("aria-expanded", "false");
+    await pageMenu.dispatchEvent("pointercancel", {
+      pointerId: 2,
+      pointerType: "touch",
+      isPrimary: true,
+    });
+    await pageMenu.tap();
+    await expect(page.getByRole("menu")).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("native swipes starting on summary rows scroll without opening or changing menus", async ({
+  browser,
+  browserName,
+  request,
+}) => {
+  test.skip(
+    browserName !== "chromium",
+    "Native touch injection uses Chromium CDP",
+  );
+  await mutate(request, [
+    set("views", { ...fixture.view, groupBy: fixture.fields[4].id }),
+    ...Array.from({ length: 30 }, (_, i) =>
+      set("records", {
+        ...fixture.records[0],
+        id: fixture.prefix + "_swipe_" + i,
+        order: i + 2,
+      }),
+    ),
+  ]);
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    serviceWorkers: "block",
+    storageState: await request.storageState(),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("/#page=" + fixture.dbPage.id);
+    const summary = page
+      .locator(".group-summary")
+      .first()
+      .getByRole("button", { name: "数量汇总", exact: true });
+    const tableScroll = page.locator(".table-scroll");
+    const mainScroll = page.locator(".main-scroll");
+    const cdp = await context.newCDPSession(page);
+    for (const axis of ["x", "y"] as const) {
+      await summary.scrollIntoViewIfNeeded();
+      const box = (await summary.boundingBox())!;
+      const x = Math.min(350, box.x + box.width / 2);
+      const y = box.y + box.height / 2;
+      const scroller = axis === "x" ? tableScroll : mainScroll;
+      const before = await scroller.evaluate(
+        (el, axis) => (axis === "x" ? el.scrollLeft : el.scrollTop),
+        axis,
+      );
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      for (let step = 1; step <= 6; step++) {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [
+            {
+              x: x - (axis === "x" ? step * 18 : 0),
+              y: y - (axis === "y" ? step * 18 : 0),
+            },
+          ],
+        });
+      }
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect
+        .poll(() =>
+          scroller.evaluate(
+            (el, axis) => (axis === "x" ? el.scrollLeft : el.scrollTop),
+            axis,
+          ),
+        )
+        .toBeGreaterThan(before + 20);
+    }
+    expect(
+      (await snapshot(request)).fields.find(
+        (f: any) => f.id === fixture.fields[1].id,
+      ).summary,
+    ).toBe("sum");
+  } finally {
+    await context.close();
+  }
+});
+
 test("touch navigation opens a page with one tap and has no drag or double-tap rename", async ({
   browser,
   request,

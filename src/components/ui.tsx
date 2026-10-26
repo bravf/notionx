@@ -1,7 +1,7 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { X, ChevronRight, Check } from "lucide-react";
-import { useId } from "react";
+import { useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
 export function Modal({
   open,
@@ -64,9 +64,32 @@ export function Menu({
   modal?: boolean;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const pointerType = useRef("mouse");
+  const changeOpen = (next: boolean) => {
+    setOpen(next);
+    onOpenChange?.(next);
+  };
   return (
-    <Dropdown.Root onOpenChange={onOpenChange} modal={modal}>
-      <Dropdown.Trigger asChild>{trigger}</Dropdown.Trigger>
+    <Dropdown.Root open={open} onOpenChange={changeOpen} modal={modal}>
+      <Dropdown.Trigger
+        asChild
+        onPointerDownCapture={(event) => {
+          pointerType.current = event.pointerType;
+          // Radix opens on pointerdown; touch must wait for a native click
+          // so the browser can cancel activation when the gesture scrolls.
+          if (event.pointerType !== "mouse") event.stopPropagation();
+        }}
+        onClick={(event) => {
+          if (pointerType.current !== "mouse" || event.detail === 0)
+            changeOpen(!open);
+        }}
+        onKeyDown={() => {
+          pointerType.current = "mouse";
+        }}
+      >
+        {trigger}
+      </Dropdown.Trigger>
       <Dropdown.Portal>
         <Dropdown.Content
           className="dropdown"
