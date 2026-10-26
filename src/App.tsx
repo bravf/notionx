@@ -1,9 +1,9 @@
+import { BrandMark } from "./components/BrandMark";
 import { Select } from "./components/Select";
 import { AuthProvider, useAuth, PasswordForm } from "./auth";
 import { AdminPanel } from "./components/AdminPanel";
 import { useEffect, useRef, useState } from "react";
 import {
-  BookOpen,
   Search,
   Plus,
   ChevronDown,
@@ -844,9 +844,7 @@ function Workspace() {
       <aside className="sidebar">
         <div className="workspace-switch">
           <button className="brand" onClick={goHome}>
-            <span className="brand-mark">
-              <BookOpen size={20} />
-            </span>
+            <BrandMark />
             <span>
               NotionX<span className="brand-sub">我的个人空间</span>
             </span>
@@ -1130,9 +1128,7 @@ function Workspace() {
         >
           {status === "loading" ? (
             <div className="loading-state">
-              <span className="brand-mark">
-                <BookOpen size={23} />
-              </span>
+              <BrandMark />
               <p>打开你的工作空间…</p>
             </div>
           ) : !page ? (
@@ -1993,9 +1989,7 @@ function Workspace() {
           </p>
         </div>
         <div className="settings-footer">
-          <span className="brand-mark">
-            <BookOpen size={15} />
-          </span>
+          <BrandMark />
           <strong>NotionX</strong>
           <span>让想法有处安放。 · v1.0</span>
         </div>

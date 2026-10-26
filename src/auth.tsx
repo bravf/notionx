@@ -1,3 +1,4 @@
+import { BrandMark } from "./components/BrandMark";
 import {
   createContext,
   useCallback,
@@ -78,7 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return (
       <div className="auth-screen">
         <div className="auth-card">
-          <div className="brand-mark">N</div>
+          <BrandMark />
           <h2>NotionX</h2>
           <p>{error || "正在连接你的空间…"}</p>
           {error && (
@@ -112,7 +113,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {user.mustChangePassword ? (
         <div className="auth-screen">
           <div className="auth-card">
-            <div className="brand-mark">N</div>
+            <BrandMark />
             <h2>设置你的新密码</h2>
             <p>这是临时密码，修改后即可进入私人空间。</p>
             <PasswordForm required />
@@ -169,7 +170,7 @@ function AuthScreen({
   return (
     <div className="auth-screen">
       <form className="auth-card" onSubmit={submit} key={String(register)}>
-        <div className="brand-mark">N</div>
+        <BrandMark />
         <h2>{register ? "开启你的私人空间" : "欢迎回到NotionX"}</h2>
         <p>
           {register
