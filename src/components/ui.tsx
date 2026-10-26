@@ -10,6 +10,7 @@ export function Modal({
   description,
   children,
   className = "",
+  onOpenAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
@@ -17,6 +18,7 @@ export function Modal({
   description?: string;
   children: ReactNode;
   className?: string;
+  onOpenAutoFocus?: (event: Event) => void;
 }) {
   const descriptionId = useId();
   return (
@@ -26,6 +28,7 @@ export function Modal({
         <DialogPrimitive.Content
           className={"modal " + className}
           aria-describedby={description ? descriptionId : undefined}
+          onOpenAutoFocus={onOpenAutoFocus}
         >
           <div className="modal-heading">
             <div>

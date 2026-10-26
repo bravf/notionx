@@ -3470,6 +3470,9 @@ export function DatabaseGrid({
         onOpenChange={(v) => !v && setMobileCell(null)}
         title={cellField?.name || "编辑单元格"}
         className="cell-modal"
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+        }}
       >
         {cellField && (
           <form
@@ -3574,7 +3577,6 @@ export function DatabaseGrid({
                     ? "网址"
                     : "内容"}
                 <input
-                  autoFocus
                   inputMode={
                     cellField.type === "number"
                       ? "decimal"

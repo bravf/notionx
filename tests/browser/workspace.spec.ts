@@ -660,6 +660,34 @@ test("mobile navigation, cell sheet, date-free numeric editing and full screen r
   await expect(page.locator(".app")).not.toHaveClass(/mobile-sidebar-open/);
 });
 
+test("touching a numeric cell opens its editor without opening the keyboard", async ({
+  browser,
+  request,
+}) => {
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    serviceWorkers: "block",
+    storageState: await request.storageState(),
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto("/#page=" + fixture.dbPage.id);
+    const cell = page.locator(
+      `[data-row-id="${fixture.records[0].id}"] td[data-field-id="${fixture.fields[1].id}"] button.cell-value`,
+    );
+    await cell.tap();
+    const sheet = page.getByRole("dialog", { name: "数量", exact: true });
+    const input = sheet.getByLabel("输入数字");
+    await expect(sheet).toBeVisible();
+    await expect(input).not.toBeFocused();
+    await input.tap();
+    await expect(input).toBeFocused();
+  } finally {
+    await context.close();
+  }
+});
+
 test("touch navigation opens a page with one tap and has no drag or double-tap rename", async ({
   browser,
   request,
