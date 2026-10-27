@@ -85,7 +85,7 @@ function renderTemplate(template: any, context: any) {
 const numeric = (f: Field) => f.type === "number" || f.type === "formula";
 const readonly = (f: Field) =>
   ["formula", "created", "updated"].includes(f.type);
-const headerIcons = {
+const fieldIcons = {
   title: Heading,
   text: Type,
   number: Hash,
@@ -100,7 +100,7 @@ const headerIcons = {
   updated: History,
 };
 function FieldSymbol({ type }: { type: FieldType }) {
-  const Icon = headerIcons[type] || Type;
+  const Icon = fieldIcons[type] || Type;
   return <Icon size={15} strokeWidth={1.8} aria-hidden="true" />;
 }
 function safeValue(field: Field, row: Entry, fields: Field[]): any {
@@ -724,6 +724,7 @@ function FieldEditor({
           <Select
             disabled={field.type === "title"}
             value={draft.type}
+            renderIcon={(type) => <FieldSymbol type={type as FieldType} />}
             onChange={(e) => {
               setDraft({
                 ...draft,
@@ -739,10 +740,10 @@ function FieldEditor({
               setConversion(null);
             }}
           >
-            {field.type === "title" && <option value="title">Aa 标题</option>}
+            {field.type === "title" && <option value="title">标题</option>}
             {fieldTypes.map((t) => (
               <option value={t.value} key={t.value}>
-                {t.symbol} {t.label}
+                {t.label}
               </option>
             ))}
           </Select>
@@ -3434,7 +3435,9 @@ export function DatabaseGrid({
                 .map((f) => (
                   <div key={f.id}>
                     <label>
-                      <span className="field-symbol">{symbol(f.type)}</span>
+                      <span className="field-symbol">
+                        <FieldSymbol type={f.type} />
+                      </span>
                       {f.name}
                     </label>
                     <Cell

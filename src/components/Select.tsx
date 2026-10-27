@@ -9,12 +9,14 @@ export function Select({
   value,
   onChange,
   disabled,
+  renderIcon,
   ...props
 }: {
   children: ReactNode;
   value?: string | number;
   onChange: (event: { target: { value: string } }) => void;
   disabled?: boolean;
+  renderIcon?: (value: string) => ReactNode;
   id?: string;
   className?: string;
   "aria-label"?: string;
@@ -77,7 +79,16 @@ export function Select({
                 data-value={o.value}
                 disabled={o.disabled}
               >
-                <Primitive.ItemText>{o.label}</Primitive.ItemText>
+                <Primitive.ItemText>
+                  {renderIcon ? (
+                    <span className="select-option-label">
+                      {renderIcon(o.value)}
+                      <span>{o.label}</span>
+                    </span>
+                  ) : (
+                    o.label
+                  )}
+                </Primitive.ItemText>
                 <Primitive.ItemIndicator>
                   <Check size={14} />
                 </Primitive.ItemIndicator>

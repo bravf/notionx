@@ -646,6 +646,21 @@ test("mobile navigation, cell sheet, date-free numeric editing and full screen r
   await first.getByRole("button", { name: "打开记录", exact: true }).click();
   const detail = page.getByRole("dialog", { name: "记录详情" });
   await expect(detail).toBeVisible();
+  for (const field of fixture.fields.filter((f: any) => f.type !== "title")) {
+    const headerIcon = page.locator(
+      `thead th[data-field-id="${field.id}"] .field-symbol svg`,
+    );
+    const detailIcon = detail
+      .locator(".record-properties > div > label")
+      .filter({ hasText: field.name })
+      .locator(".field-symbol svg");
+    await expect(detailIcon).toHaveAttribute(
+      "class",
+      (await headerIcon.getAttribute("class"))!,
+    );
+    await expect(detailIcon).toHaveAttribute("width", "15");
+    await expect(detailIcon).toHaveAttribute("stroke-width", "1.8");
+  }
   await detail.getByRole("button", { name: "数量", exact: true }).click();
   const sheet = page.getByRole("dialog", { name: "数量", exact: true });
   await expect(sheet).toBeVisible();
@@ -2303,17 +2318,46 @@ test("Radix property selector supports keyboard selection and Escape without cha
   await page.goto("/#page=" + fixture.dbPage.id);
   await page.getByRole("button", { name: "添加属性", exact: true }).click();
   const type = page.getByRole("combobox", { name: "属性类型", exact: true });
+  await expect(type.locator(".select-option-label > svg")).toHaveClass(
+    /lucide-type/,
+  );
   await type.focus();
   await page.keyboard.press("Space");
+  const types = [
+    ["text", "文本", "type"],
+    ["number", "数字", "hash"],
+    ["select", "单选", "circle-dot"],
+    ["multiSelect", "多选", "tags"],
+    ["status", "状态", "circle-dashed"],
+    ["date", "日期", "calendar-days"],
+    ["checkbox", "复选框", "square-check-big"],
+    ["url", "链接", "link"],
+    ["formula", "公式", "square-function"],
+    ["created", "创建时间", "calendar-clock"],
+    ["updated", "更新时间", "history"],
+  ];
+  await expect(page.getByRole("option")).toHaveCount(types.length);
+  for (const [value, label, icon] of types) {
+    const option = page.getByRole("option", { name: label, exact: true });
+    await expect(option).toHaveAttribute("data-value", value);
+    const svg = option.locator(".select-option-label > svg");
+    await expect(svg).toHaveClass(new RegExp(`lucide-${icon}(?: |$)`));
+    await expect(svg).toHaveAttribute("width", "15");
+    await expect(svg).toHaveAttribute("stroke-width", "1.8");
+    await expect(svg).toHaveAttribute("aria-hidden", "true");
+  }
   await expect(
-    page.getByRole("option", { name: "Aa 文本", exact: true }),
+    page.getByRole("option", { name: "文本", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(
-    page.getByRole("option", { name: "# 数字", exact: true }),
+    page.getByRole("option", { name: "数字", exact: true }),
   ).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(type).toContainText("数字");
+  await expect(type.locator(".select-option-label > svg")).toHaveClass(
+    /lucide-hash/,
+  );
   await type.click();
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Escape");
@@ -2321,6 +2365,67 @@ test("Radix property selector supports keyboard selection and Escape without cha
   await page.getByLabel("属性名称").fill("新数值");
   await page.getByRole("button", { name: "保存属性" }).click();
   await expect(page.locator("thead")).toContainText("新数值");
+  await expect(
+    page
+      .locator("thead .column-heading > button")
+      .filter({ hasText: "新数值" })
+      .locator(".field-symbol svg"),
+  ).toHaveAttribute("class", "lucide lucide-hash");
+  await page
+    .locator("thead .column-heading > button")
+    .filter({ hasText: "名称" })
+    .click();
+  await page.getByRole("menuitem", { name: "编辑属性" }).click();
+  await expect(type).toBeDisabled();
+  await expect(type).toContainText("标题");
+  await expect(type.locator(".select-option-label > svg")).toHaveClass(
+    /lucide-heading/,
+  );
+  await page
+    .getByRole("dialog", { name: "编辑属性" })
+    .getByRole("button", { name: "关闭", exact: true })
+    .click();
+});
+
+test("touch property selector shows SVG icons and selects scrolled options", async ({
+  browser,
+  request,
+}) => {
+  const context = await browser.newContext({
+    ...devices["iPhone 13"],
+    baseURL: process.env.TEST_URL || "http://localhost:5173",
+    serviceWorkers: "block",
+  });
+  try {
+    await context.addCookies((await request.storageState()).cookies);
+    const page = await context.newPage();
+    await page.goto("/#page=" + fixture.dbPage.id);
+    await page.getByRole("button", { name: "添加属性", exact: true }).tap();
+    const type = page.getByRole("combobox", { name: "属性类型", exact: true });
+    await type.tap();
+    const date = page.getByRole("option", { name: "日期", exact: true });
+    await date.scrollIntoViewIfNeeded();
+    await date.tap();
+    await expect(type).toHaveText("日期");
+    await expect(type.locator(".select-option-label > svg")).toHaveClass(
+      /lucide-calendar-days/,
+    );
+    await type.tap();
+    const updated = page.getByRole("option", { name: "更新时间", exact: true });
+    await updated.scrollIntoViewIfNeeded();
+    await updated.tap();
+    await expect(type).toHaveText("更新时间");
+    await expect(type.locator(".select-option-label > svg")).toHaveClass(
+      /lucide-history/,
+    );
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBeTruthy();
+  } finally {
+    await context.close();
+  }
 });
 
 test("format toolbar appears only for text selections, follows the selection and hides on blur", async ({

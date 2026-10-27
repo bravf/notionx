@@ -1736,7 +1736,7 @@ kbd {
   left: 0;
   z-index: 3;
   background: #fff;
-  box-shadow: 1px 0 #e6ecdf;
+  border-right-color: #edf0e7;
 }
 .data-table th:nth-child(2) {
   z-index: 5;
@@ -1805,6 +1805,8 @@ kbd {
   opacity: 1;
 }
 .field-symbol {
+  display: inline-flex;
+  align-items: center;
   font-family: "Manrope", sans-serif;
   font-size: 12px;
   color: #a6b099;
@@ -2041,7 +2043,6 @@ kbd {
 }
 .summary-row td:nth-child(2) {
   background: #fcfdf9;
-  box-shadow: none;
 }
 .summary-button {
   display: flex;
@@ -4605,6 +4606,19 @@ kbd {
   outline: none;
   cursor: default;
   user-select: none;
+}
+.select-option-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+.select-option-label > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .select-option[data-highlighted] {
   background: #edf3eb;
